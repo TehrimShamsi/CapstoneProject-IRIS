@@ -92,6 +92,19 @@ class SessionManager:
         session["updated_at"] = iso_now()
         self._atomic_write(self._session_path(session_id), session)
 
+    def create_paper_entry(self, paper_id: str, metadata: Dict[str, Any]) -> None:
+        """Create a paper entry without a session (for direct uploads)"""
+        papers_dir = self.base_dir / "papers"
+        papers_dir.mkdir(parents=True, exist_ok=True)
+
+        paper_file = papers_dir / f"{paper_id}.json"
+        paper_obj = {
+            "paper_id": paper_id,
+            "created_at": iso_now(),
+            "metadata": metadata,
+        }
+        self._atomic_write(paper_file, paper_obj)
+
     # ------------------ Notes ------------------
     def add_note_to_session(self, session_id: str, note: str) -> None:
         session = self.get_session(session_id)
@@ -118,6 +131,13 @@ class SessionManager:
             p.unlink()
             return True
         return False
+
+    def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Alias for get_session() for backwards compatibility: returns None if missing."""
+        try:
+            return self.get_session(session_id)
+        except FileNotFoundError:
+            return None
 
     # ---------------------------------------------------------
     # NEW: Search / Query Methods

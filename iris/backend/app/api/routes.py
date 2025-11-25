@@ -46,6 +46,16 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 # -----------------------------
+# Create Session
+# -----------------------------
+@router.post("/session")
+async def create_session_endpoint(user_id: str = "demo_user"):
+    """Create a new session"""
+    session_id = session_manager.create_session(user_id)
+    return {"session_id": session_id}
+
+
+# -----------------------------
 # Analyze Paper
 # -----------------------------
 @router.post("/analyze")

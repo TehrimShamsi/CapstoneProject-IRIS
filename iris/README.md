@@ -23,11 +23,11 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-4. Create a `.env` from the example and add your Google API key (or set `GOOGLE_APPLICATION_CREDENTIALS`):
+4. Create a `.env` from the example and add your Google API key:
 
 ```powershell
 copy .env.example .env
-# then edit .env and set GOOGLE_API_KEY or set GOOGLE_APPLICATION_CREDENTIALS to a service account JSON
+# then edit .env and set GOOGLE_API_KEY
 ```
 
 5. Run the API:
@@ -41,7 +41,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Notes on Gemini / Google Generative AI
 
 - The backend now uses `iris/backend/app/llm/llm_client.py`, which calls `google.generativeai`.
-- Set `GOOGLE_API_KEY` in `.env` or use ADC (`GOOGLE_APPLICATION_CREDENTIALS`) if using a service account.
+- Set `GOOGLE_API_KEY` in `.env`.
 -- Change `GOOGLE_MODEL` in `.env` if you need a different model. This project defaults to `gemini-2.5-flash-lite`.
 
 Frontend

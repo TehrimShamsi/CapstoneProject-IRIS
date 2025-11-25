@@ -1,10 +1,8 @@
 """LLM client wrapper — Google Generative AI (Gemini) implementation.
 
-This replaces the previous OpenAI example. It uses `google-generativeai` and
-reads credentials from `GOOGLE_API_KEY` (or relies on ADC via
-`GOOGLE_APPLICATION_CREDENTIALS`).
-
-Set `GOOGLE_API_KEY` in your environment or `.env` file.
+This uses `google-generativeai` and requires `GOOGLE_API_KEY` to be set in
+the environment (or in `.env`). The codebase does NOT use Application Default
+Credentials (service-account JSON) — `GOOGLE_API_KEY` is sufficient.
 """
 
 import os
@@ -28,9 +26,13 @@ class _RealLLMClient:
 
     def __init__(self):
         api_key = os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            # configure with API key when provided
-            genai.configure(api_key=api_key)
+        if not api_key:
+            raise RuntimeError(
+                "GOOGLE_API_KEY is required for the real LLM client. "
+                "Set GOOGLE_API_KEY in your environment or enable USE_MOCK_LLM."
+            )
+        # configure with API key
+        genai.configure(api_key=api_key)
 
         raw_model = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite")
         if raw_model.startswith("models/") or raw_model.startswith("tunedModels/"):

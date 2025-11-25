@@ -30,11 +30,18 @@ class Orchestrator:
         print("[ORCH] Fetch complete.")
 
         # --- Parallel Analysis ---
+        # ✅ FIX: AnalysisAgent.analyze expects (paper_id, pdf_path, trace_id=None)
+        from app.tools.arxiv_fetcher import ArxivFetcher
+        fetcher = ArxivFetcher()
+
         with ThreadPoolExecutor(max_workers=3) as exe:
-            analysis_jobs = [
-                exe.submit(self.analysis_agent.analyze, p["paper_id"], p["title"], p["chunks"])
-                for p in fetch_results
-            ]
+            analysis_jobs = []
+            for arxiv_id in arxiv_ids:
+                # ensure we have a local PDF path
+                pdf_path = fetcher.fetch(arxiv_id)
+                job = exe.submit(self.analysis_agent.analyze, arxiv_id, pdf_path)
+                analysis_jobs.append(job)
+
             analyses = [a.result() for a in analysis_jobs]
 
         print("[ORCH] Analysis complete.")

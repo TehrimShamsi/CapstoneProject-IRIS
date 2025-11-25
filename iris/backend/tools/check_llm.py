@@ -31,9 +31,9 @@ except Exception:
     pass
 
 if __name__ == "__main__":
-    key = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    key = os.getenv("GOOGLE_API_KEY")
     if not key:
-        print("Warning: GOOGLE_API_KEY or GOOGLE_APPLICATION_CREDENTIALS not set. Set it before running this test.")
+        print("Warning: GOOGLE_API_KEY not set. Set it before running this test or enable USE_MOCK_LLM.")
 
     client = LLMClient()
     try:
