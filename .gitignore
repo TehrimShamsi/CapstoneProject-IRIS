@@ -1,0 +1,61 @@
+# Repo root .gitignore - ignores common Python/Node/IDE/build files and secrets
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+.env
+.env.*
+
+# Distribution / packaging
+dist/
+build/
+*.egg
+*.egg-info
+wheelhouse/
+
+# Node
+node_modules/
+frontend/node_modules/
+package-lock.json
+pnpm-lock.yaml
+
+# Frontend build
+/frontend/dist
+/frontend/.vite
+
+# Editor/IDE
+.vscode/
+.idea/
+*.suo
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Secrets and keys
+client_secret_*.json
+*-sa.json
+*.key
+*.pem
+*.crt
+
+# caches
+.cache/
+
+# Ignore the nested iris/ workspace folder contents if you manage them separately
+# (optional: comment out if you want to track files under `iris/` directly)
+# iris/
