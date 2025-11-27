@@ -31,15 +31,31 @@ except Exception:
     pass
 
 if __name__ == "__main__":
+    # Allow overriding model via CLI: `python tools/check_llm.py --model gemini-2.0-flash`
+    model_arg = None
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--model", "-m"):
+        model_arg = sys.argv[2]
+        os.environ["GOOGLE_MODEL"] = model_arg
+
     key = os.getenv("GOOGLE_API_KEY")
     if not key:
         print("Warning: GOOGLE_API_KEY not set. Set it before running this test or enable USE_MOCK_LLM.")
 
-    client = LLMClient()
+    print("Using GOOGLE_MODEL:", os.getenv("GOOGLE_MODEL", "(not set)"))
+
     try:
+        client = LLMClient()
+    except Exception as e:
+        print("Failed to initialize LLMClient:", e)
+        sys.exit(1)
+
+    try:
+        print("Sending test prompt to model...")
         resp = client.call("Say hello in one sentence.", max_tokens=50)
         print("LLM response:")
         print(resp)
     except Exception as e:
         print("LLM call failed:", e)
+        print("If this is a 404, verify your GOOGLE_MODEL is available to your API key and run: ")
+        print("  Invoke-RestMethod -Uri \"https://generativelanguage.googleapis.com/v1beta/models?key=$env:GOOGLE_API_KEY\" -Method GET")
         sys.exit(2)

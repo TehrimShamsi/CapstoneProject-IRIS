@@ -63,7 +63,59 @@ export async function getEvaluation(sessionId) {
 
 // Backwards-compatible alias used by components
 export async function getEvaluationReport(sessionId = null) {
-  // If no sessionId provided, callers should pass one; using 'demo' as fallback.
   const sid = sessionId || "demo";
   return getEvaluation(sid);
+}
+
+// ===== NEW: Search & Discovery Functions =====
+
+// Search ArXiv papers
+export async function searchArxiv(query, maxResults = 10) {
+  const res = await api.get("/search_arxiv", {
+    params: { query, max_results: maxResults }
+  });
+  return res.data;
+}
+
+// Get trending papers
+export async function getTrendingPapers(category = "cs.AI", maxResults = 10) {
+  const res = await api.get("/trending_papers", {
+    params: { category, max_results: maxResults }
+  });
+  return res.data;
+}
+
+// Get suggested papers
+export async function getSuggestedPapers(sessionId = null, maxSuggestions = 8) {
+  const res = await api.post("/suggest_papers", null, {
+    params: { 
+      session_id: sessionId,
+      max_suggestions: maxSuggestions 
+    }
+  });
+  return res.data;
+}
+
+// Search by author
+export async function searchByAuthor(authorName, maxResults = 10) {
+  const res = await api.get("/search_by_author", {
+    params: { author: authorName, max_results: maxResults }
+  });
+  return res.data;
+}
+
+// Find similar papers
+export async function findSimilarPapers(paperId, maxResults = 5) {
+  const res = await api.get(`/similar_papers/${paperId}`, {
+    params: { max_results: maxResults }
+  });
+  return res.data;
+}
+
+// Download paper from ArXiv
+export async function downloadArxivPaper(arxivId) {
+  const res = await api.post("/download_arxiv_paper", null, {
+    params: { arxiv_id: arxivId }
+  });
+  return res.data;
 }

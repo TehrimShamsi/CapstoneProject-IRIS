@@ -9,13 +9,12 @@ import google.generativeai as genai
 from app.utils.observability import agent_call
 from app.tools.pdf_processor import PDFProcessor
 
-# Configure Gemini from env var (should be set in your environment)
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+# Configure Gemini from env var - USE GOOGLE_API_KEY (not GEMINI_API_KEY)
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_KEY:
+    genai.configure(api_key=GOOGLE_KEY)
 else:
     # If not set, we'll still allow the module to import; runtime calls will error clearly.
-    # You can also raise here if you want strict behavior.
     pass
 
 
@@ -27,7 +26,6 @@ def _clean_model_text(text: str) -> str:
     if not text:
         return text
     # Remove triple-backtick blocks and keep the inner content if needed
-    # If multiple blocks exist, prefer the first JSON-looking block
     if "```" in text:
         parts = text.split("```")
         # find a part that looks like JSON
@@ -50,9 +48,10 @@ class AnalysisAgent:
     Extracts structured claims, methods and metrics from PDF text.
     """
 
-    def __init__(self, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, model_name: str = None):
         self.pdf = PDFProcessor()
-        self.model_name = model_name
+        # Use GOOGLE_MODEL from env, fallback to gemini-2.5-flash
+        self.model_name = model_name or os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
         # Create a model handle if configured
         try:
             self.model = genai.GenerativeModel(self.model_name)

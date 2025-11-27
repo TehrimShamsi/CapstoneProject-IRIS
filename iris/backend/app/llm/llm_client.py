@@ -1,15 +1,13 @@
 """LLM client wrapper — Google Generative AI (Gemini) implementation.
 
 This uses `google-generativeai` and requires `GOOGLE_API_KEY` to be set in
-the environment (or in `.env`). The codebase does NOT use Application Default
-Credentials (service-account JSON) — `GOOGLE_API_KEY` is sufficient.
+the environment (or in `.env`).
 """
 
 import os
 from typing import Optional
 
-# Provide a safe mock mode for local development to avoid incurring charges.
-# Set environment variable `USE_MOCK_LLM=1` to enable.
+# Mock mode for local development
 USE_MOCK = os.getenv("USE_MOCK_LLM", "").lower() in ("1", "true", "yes")
 
 if not USE_MOCK:
@@ -31,50 +29,72 @@ class _RealLLMClient:
                 "GOOGLE_API_KEY is required for the real LLM client. "
                 "Set GOOGLE_API_KEY in your environment or enable USE_MOCK_LLM."
             )
-        # configure with API key
+        
+        # Configure with API key
         genai.configure(api_key=api_key)
 
-        raw_model = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite")
-        if raw_model.startswith("models/") or raw_model.startswith("tunedModels/"):
-            self.model = raw_model
-        else:
-            self.model = f"models/{raw_model}"
+        # Get model name from env, default to gemini-1.5-flash
+        raw_model = os.getenv("GOOGLE_MODEL", "gemini-1.5-flash")
+        
+        # Don't add "models/" prefix - the SDK handles it
+        self.model_name = raw_model
+        
         try:
             self.max_tokens_default = int(os.getenv("MAX_TOKENS_DEFAULT", "1024"))
         except Exception:
             self.max_tokens_default = 1024
 
+        print(f"Using GOOGLE_MODEL: {self.model_name}")
+
     def call(self, prompt: str, max_tokens: Optional[int] = None, temperature: float = 0.0) -> str:
+        """Call the Gemini API with the given prompt."""
         max_tokens = max_tokens or self.max_tokens_default
+        
         try:
-            if hasattr(genai, "chat") and hasattr(genai.chat, "completions"):
-                messages = [{"role": "user", "content": prompt}]
-                resp = genai.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
+            # Create model instance
+            model = genai.GenerativeModel(self.model_name)
+            
+            print("Sending test prompt to model...")
+            
+            # Generate content
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
                     max_output_tokens=max_tokens,
+                    temperature=temperature,
                 )
-                if hasattr(resp, "candidates") and len(resp.candidates) > 0:
-                    return getattr(resp.candidates[0], "content", str(resp.candidates[0]))
-                if hasattr(resp, "choices") and len(resp.choices) > 0:
-                    choice = resp.choices[0]
-                    if hasattr(choice, "message") and isinstance(choice.message, dict):
-                        return choice.message.get("content") or str(choice)
-                    return getattr(choice, "text", str(choice))
-
-            if hasattr(genai, "generate_text"):
-                resp = genai.generate_text(model=self.model, prompt=prompt, max_output_tokens=max_tokens)
-                if hasattr(resp, "text"):
-                    return resp.text
-                if hasattr(resp, "candidates") and len(resp.candidates) > 0:
-                    return getattr(resp.candidates[0], "output", str(resp.candidates[0]))
-
-            resp = genai.generate_text(model=self.model, prompt=prompt, max_output_tokens=max_tokens)
-            return str(resp)
+            )
+            
+            # Extract text from response
+            if hasattr(response, 'text'):
+                return response.text
+            elif hasattr(response, 'candidates') and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    return ''.join(part.text for part in candidate.content.parts if hasattr(part, 'text'))
+            
+            return str(response)
 
         except Exception as e:
-            raise RuntimeError(f"LLM call failed: {e}") from e
+            error_msg = str(e)
+            
+            # Provide helpful error messages
+            if "404" in error_msg:
+                raise RuntimeError(
+                    f"LLM call failed: {e}\n"
+                    f"If this is a 404, verify your GOOGLE_MODEL is available to your API key and run:\n"
+                    f"   Invoke-RestMethod -Uri \"https://generativelanguage.googleapis.com/v1beta/models?key=$env:GOOGLE_API_KEY\" -Method GET"
+                ) from e
+            elif "403" in error_msg or "API key" in error_msg:
+                raise RuntimeError(
+                    f"LLM call failed: {e}\n"
+                    f"API key error. Verify:\n"
+                    f"1. Your GOOGLE_API_KEY is set correctly\n"
+                    f"2. The key is valid at https://aistudio.google.com/app/apikey\n"
+                    f"3. Generative Language API is enabled"
+                ) from e
+            else:
+                raise RuntimeError(f"LLM call failed: {e}") from e
 
 
 class _MockLLMClient:
@@ -85,10 +105,9 @@ class _MockLLMClient:
 
     def call(self, prompt: str, max_tokens: Optional[int] = None, temperature: float = 0.0) -> str:
         max_tokens = max_tokens or self.max_tokens_default
-        # Return a short deterministic mock response that resembles model output.
         snippet = prompt.strip().replace("\n", " ")[:160]
         return f"[MOCK-GEMINI RESPONSE | tokens={min(32, max_tokens)}] {snippet}"
 
 
-# Export the public name expected elsewhere in the codebase: `LLMClient`.
+# Export the public name expected elsewhere in the codebase
 LLMClient = _MockLLMClient if USE_MOCK else _RealLLMClient

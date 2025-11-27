@@ -4,7 +4,8 @@ from fastapi import UploadFile
 
 class PDFProcessor:
     def __init__(self):
-        self.base = Path("data/pdfs")
+        # Use app-relative data folder so paths match SessionManager defaults
+        self.base = Path(__file__).resolve().parents[1] / "data" / "pdfs"
         self.base.mkdir(parents=True, exist_ok=True)
 
     def save_pdf(self, file: UploadFile, paper_id: str) -> str:

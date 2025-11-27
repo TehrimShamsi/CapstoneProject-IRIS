@@ -57,7 +57,6 @@ export default function UploadPaper() {
       }, 1500);
     } catch (err) {
       console.error("Upload error:", err);
-      // Network errors (no backend) vs server error with response
       if (err.message && err.message.toLowerCase().includes("network")) {
         setError("Network error: cannot reach backend. Is the backend running at http://localhost:8000 ?");
       } else if (err.response) {
@@ -74,9 +73,37 @@ export default function UploadPaper() {
 
   return (
     <div className="max-w-2xl mx-auto p-6">
-      <h2 className="text-3xl font-bold mb-6 text-center text-gray-800">
-        Upload Research Paper
-      </h2>
+      <div className="text-center mb-8">
+        <h1 className="text-4xl font-bold mb-3 text-gray-800">
+          IRIS Research Assistant
+        </h1>
+        <p className="text-gray-600">
+          Upload a PDF or discover papers from ArXiv
+        </p>
+      </div>
+
+      {/* Quick action buttons */}
+      <div className="flex gap-4 mb-8">
+        <button
+          onClick={() => navigate("/search")}
+          className="flex-1 py-3 px-6 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition shadow-md font-semibold"
+        >
+          🔍 Search ArXiv Papers
+        </button>
+        
+        <button
+          onClick={() => navigate("/metrics")}
+          className="flex-1 py-3 px-6 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition shadow-md font-semibold"
+        >
+          📊 View Metrics
+        </button>
+      </div>
+
+      <div className="mb-6 text-center">
+        <h2 className="text-2xl font-bold text-gray-800">
+          Upload Your Paper
+        </h2>
+      </div>
 
       <div
         className={`

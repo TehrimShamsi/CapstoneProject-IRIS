@@ -6,6 +6,7 @@ import AnalysisView from "./components/AnalysisView";
 import SynthesisView from "./components/SynthesisView";
 import MetricsDashboard from "./components/MetricsDashboard";
 import EvaluationReport from "./components/EvaluationReport";
+import PaperSearch from "./components/PaperSearch";
 
 export default function App() {
   return (
@@ -15,6 +16,9 @@ export default function App() {
 
           {/* Upload Page */}
           <Route path="/" element={<UploadPaper />} />
+
+          {/* NEW: Paper Search & Discovery */}
+          <Route path="/search" element={<PaperSearch />} />
 
           {/* Analysis */}
           <Route path="/analyze/:paperId" element={<AnalysisView />} />

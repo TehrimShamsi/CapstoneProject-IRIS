@@ -1,11 +1,12 @@
 """
 Improved JSON-backed Session Manager + MemoryBank
 
-Improvements added:
-✔ Better error handling (FileNotFoundError instead of silent None)
-✔ New query/search methods (get_sessions_by_user, get_sessions_by_date)
-✔ Optional file-size tracking (stored in session JSON)
-✔ Same atomic write guarantees
+Improvements:
+✔ Better error handling
+✔ Query/search methods (get_sessions_by_user, get_sessions_by_date)
+✔ File-size tracking
+✔ Atomic write guarantees
+✔ Fixed papers structure (dict instead of list)
 """
 
 from __future__ import annotations
@@ -24,11 +25,12 @@ DEFAULT_BASE = Path.cwd() / "backend" / "app" / "data"
 # Utility helpers
 # ---------------------------------------------------------
 def iso_now() -> str:
+    """Return ISO 8601 timestamp with Z suffix"""
     return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def date_only() -> str:
-    """YYYY-MM-DD (for date-based queries)"""
+    """Return YYYY-MM-DD format"""
     return datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
 
@@ -51,18 +53,20 @@ class SessionManager:
 
     # ------------------ Session creation ------------------
     def create_session(self, user_id: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Create a new session and return session_id"""
         session_id = str(uuid.uuid4())
         session_obj = {
             "session_id": session_id,
             "user_id": user_id,
             "created_at": iso_now(),
-            "date": date_only(),            # <-- NEW: easier filtering
+            "date": date_only(),
             "updated_at": iso_now(),
             "metadata": metadata or {},
-            "papers": [],
+            "papers": {},           # ← FIX: Changed from [] to {}
             "analyses": [],
             "notes": [],
-            "file_sizes": {}               # <-- NEW: tracks analysis file sizes
+            "file_sizes": {},
+            "synthesis_result": None
         }
 
         self._atomic_write(self._session_path(session_id), session_obj)
@@ -70,19 +74,21 @@ class SessionManager:
 
     # ------------------ Add paper & analysis ------------------
     def add_paper_to_session(self, session_id: str, paper_id: str, analysis: Optional[Dict[str, Any]] = None) -> None:
+        """Add a paper with its analysis to a session"""
         session = self.get_session(session_id)
 
         # Save analysis to MemoryBank
         if analysis is not None:
             mb = MemoryBank(self.base_dir)
             file_path = mb.store(paper_id, analysis)
-
-            # Track file size (for capstone: nice engineering touch)
             session["file_sizes"][paper_id] = os.path.getsize(file_path)
 
-        # Update session structure
+        # Update session structure (papers is now a dict)
         if paper_id not in session["papers"]:
-            session["papers"].append(paper_id)
+            session["papers"][paper_id] = {}
+
+        session["papers"][paper_id]["analysis"] = analysis
+        session["papers"][paper_id]["added_at"] = iso_now()
 
         session["analyses"].append({
             "paper_id": paper_id,
@@ -107,6 +113,7 @@ class SessionManager:
 
     # ------------------ Notes ------------------
     def add_note_to_session(self, session_id: str, note: str) -> None:
+        """Add a note to a session"""
         session = self.get_session(session_id)
         session["notes"].append({
             "text": note,
@@ -117,15 +124,18 @@ class SessionManager:
 
     # ------------------ Retrieval ------------------
     def get_session(self, session_id: str) -> Dict[str, Any]:
+        """Get session data by ID (raises FileNotFoundError if not found)"""
         path = self._session_path(session_id)
         if not path.exists():
             raise FileNotFoundError(f"❌ Session not found: {session_id}")
         return json.loads(path.read_text(encoding="utf-8"))
 
     def list_sessions(self) -> List[str]:
+        """List all session IDs"""
         return [f.stem for f in self.sessions_dir.glob("*.json")]
 
     def delete_session(self, session_id: str) -> bool:
+        """Delete a session"""
         p = self._session_path(session_id)
         if p.exists():
             p.unlink()
@@ -133,17 +143,17 @@ class SessionManager:
         return False
 
     def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Alias for get_session() for backwards compatibility: returns None if missing."""
+        """Alias for get_session() - returns None if missing (backwards compatible)"""
         try:
             return self.get_session(session_id)
         except FileNotFoundError:
             return None
 
     # ---------------------------------------------------------
-    # NEW: Search / Query Methods
+    # Search / Query Methods
     # ---------------------------------------------------------
     def get_sessions_by_user(self, user_id: str) -> List[str]:
-        """Return all session_ids belonging to a given user."""
+        """Return all session_ids belonging to a given user"""
         matches = []
         for sid in self.list_sessions():
             try:
@@ -155,7 +165,7 @@ class SessionManager:
         return matches
 
     def get_sessions_by_date(self, date_str: str) -> List[str]:
-        """Return sessions created on a specific date YYYY-MM-DD."""
+        """Return sessions created on a specific date YYYY-MM-DD"""
         matches = []
         for sid in self.list_sessions():
             try:
@@ -170,10 +180,11 @@ class SessionManager:
     # Internal helpers
     # ---------------------------------------------------------
     def _session_path(self, session_id: str) -> Path:
+        """Get file path for a session"""
         return self.sessions_dir / f"{session_id}.json"
 
     def _atomic_write(self, path: Path, obj: Any) -> None:
-        """Write JSON atomically to prevent corruption."""
+        """Write JSON atomically to prevent corruption"""
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -190,7 +201,7 @@ class SessionManager:
 
 
 # ---------------------------------------------------------
-# MemoryBank (unchanged except minor cleanup)
+# MemoryBank: Long-term memory for analysis objects
 # ---------------------------------------------------------
 class MemoryBank:
     """
@@ -204,9 +215,11 @@ class MemoryBank:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
     def _sanitize(self, pid: str) -> str:
+        """Sanitize paper ID for file path"""
         return pid.replace("/", "_").replace(":", "_")
 
     def store(self, paper_id: str, analysis_obj: Dict[str, Any]) -> Path:
+        """Store analysis object and return file path"""
         fname = self._sanitize(paper_id) + ".json"
         path = self.memory_dir / fname
 
@@ -234,6 +247,7 @@ class MemoryBank:
         return path
 
     def retrieve(self, paper_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve analysis object by paper ID"""
         fname = self._sanitize(paper_id) + ".json"
         path = self.memory_dir / fname
         if not path.exists():
@@ -242,4 +256,5 @@ class MemoryBank:
         return wrapper.get("analysis")
 
     def list_papers(self) -> List[str]:
+        """List all stored paper IDs"""
         return [p.stem.replace("_", ":") for p in self.memory_dir.glob("*.json")]

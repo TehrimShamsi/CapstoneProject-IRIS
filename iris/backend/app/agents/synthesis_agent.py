@@ -6,9 +6,10 @@ from typing import List, Dict, Any, Optional
 
 from app.utils.observability import agent_call
 
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+# USE GOOGLE_API_KEY (not GEMINI_API_KEY)
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_KEY:
+    genai.configure(api_key=GOOGLE_KEY)
 
 def _clean_model_text(text: str) -> str:
     # same helper as analysis agent (duplicated for module isolation)
@@ -34,9 +35,11 @@ class SynthesisAgent:
     Produces consensus statements and contradiction pairs from a list of analyses.
     """
 
-    def __init__(self, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, model_name: str = None):
+        # Use GOOGLE_MODEL from env, fallback to gemini-2.5-flash
+        self.model_name = model_name or os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
         try:
-            self.model = genai.GenerativeModel(model_name)
+            self.model = genai.GenerativeModel(self.model_name)
         except Exception:
             self.model = None
 

@@ -13,8 +13,9 @@ export default function SynthesisView() {
   const [synthesis, setSynthesis] = useState(null);
 
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(0);    // NEW
-  const [retryCount, setRetryCount] = useState(0); // NEW
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [progress, setProgress] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
 
   const [error, setError] = useState("");
 
@@ -24,20 +25,32 @@ export default function SynthesisView() {
   useEffect(() => {
     if (!sessionId) {
       setError("Missing session ID");
+      setSessionLoading(false);
       return;
     }
 
     async function loadSession() {
       try {
+        console.log("Loading session:", sessionId);
         const s = await getSession(sessionId);
+        console.log("Session loaded:", s);
         setSession(s);
 
-        const analyzedPapers = Object.keys(s.analysis_results || {});
-        if (analyzedPapers.length >= 2) {
+        // Get papers that have been analyzed
+        // papers is now a dict
+        const analyzedPapers = Object.keys(s.papers || {}).filter(
+          (pid) => s.papers[pid]?.analysis
+        );
+        console.log("Analyzed papers:", analyzedPapers);
+        
+        if (analyzedPapers.length > 0) {
           setSelectedPapers(analyzedPapers);
         }
-      } catch {
+      } catch (err) {
+        console.error("Failed to load session:", err);
         setError("Failed to load session.");
+      } finally {
+        setSessionLoading(false);
       }
     }
 
@@ -86,21 +99,26 @@ export default function SynthesisView() {
     setProgress(0);
 
     try {
+      console.log("Starting synthesis for papers:", selectedPapers);
       await synthesizePapers(sessionId, selectedPapers);
 
       let attempts = 0;
+      const maxAttempts = 30;
+      
       const interval = setInterval(async () => {
         attempts++;
-        setProgress(Math.min((attempts / 30) * 100, 95));
+        setProgress(Math.min((attempts / maxAttempts) * 100, 95));
 
         try {
           const sessionData = await getSession(sessionId);
+          console.log("Synthesis poll attempt", attempts, "synthesis_result:", sessionData.synthesis_result);
 
           if (sessionData.synthesis_result) {
             clearInterval(interval);
             setSynthesis(sessionData.synthesis_result);
             setProgress(100);
             setLoading(false);
+            console.log("Synthesis complete");
           }
         } catch (pollErr) {
           console.error("Poll error:", pollErr);
@@ -116,7 +134,9 @@ export default function SynthesisView() {
         }
       }, 45000);
     } catch (err) {
+      console.error("Synthesis error:", err);
       if (retryCount < 3) {
+        console.log("Retrying synthesis... attempt", retryCount + 1);
         setRetryCount((prev) => prev + 1);
         setTimeout(() => runSynthesis(), 2000);
       } else {
@@ -130,16 +150,18 @@ export default function SynthesisView() {
   // Method Comparison Matrix
   // -----------------------------
   const { comparisonMatrix, allMethods } = useMemo(() => {
-    if (!session?.analysis_results) return { comparisonMatrix: {}, allMethods: [] };
+    if (!session?.papers) return { comparisonMatrix: {}, allMethods: [] };
 
     const matrix = {};
     const methodSet = new Set();
 
     selectedPapers.forEach((pid) => {
-      const analysis = session.analysis_results[pid];
+      const paperData = session.papers[pid];
+      if (!paperData?.analysis) return;
+      
       matrix[pid] = {};
 
-      analysis?.claims?.forEach((claim) => {
+      paperData.analysis?.claims?.forEach((claim) => {
         claim.methods?.forEach((m) => {
           methodSet.add(m);
           matrix[pid][m] = true;
@@ -153,10 +175,10 @@ export default function SynthesisView() {
     };
   }, [session, selectedPapers]);
 
-  // -----------------------------
+  // ─────────────────────────────────────────────
   // Loading state
-  // -----------------------------
-  if (!session && !error) {
+  // ─────────────────────────────────────────────
+  if (sessionLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen text-center">
         <div>
@@ -167,7 +189,7 @@ export default function SynthesisView() {
     );
   }
 
-  if (error) {
+  if (error && !session) {
     return (
       <div className="max-w-xl mx-auto mt-20 p-6 bg-red-50 border border-red-200 rounded-xl text-center">
         <h2 className="text-xl font-bold text-red-700">Error</h2>
@@ -182,11 +204,13 @@ export default function SynthesisView() {
     );
   }
 
-  const analyzedPapers = Object.keys(session.analysis_results || {});
+  const analyzedPapers = Object.keys(session?.papers || {}).filter(
+    (pid) => session.papers[pid]?.analysis
+  );
 
-  // -----------------------------
+  // ─────────────────────────────────────────────
   // UI Rendering
-  // -----------------------------
+  // ─────────────────────────────────────────────
   return (
     <div className="max-w-6xl mx-auto py-10 px-6">
 
@@ -202,12 +226,12 @@ export default function SynthesisView() {
         </h2>
 
         {analyzedPapers.length === 0 ? (
-          <p className="text-gray-500">No analyzed papers found.</p>
+          <p className="text-gray-500">No analyzed papers found. Upload and analyze papers first.</p>
         ) : (
           <>
             <div className="space-y-3 mb-6">
               {analyzedPapers.map((pid) => {
-                const claims = session.analysis_results[pid]?.num_claims || 0;
+                const claims = session.papers[pid]?.analysis?.claims || [];
                 return (
                   <label
                     key={pid}
@@ -221,7 +245,7 @@ export default function SynthesisView() {
                     />
                     <div className="flex-1">
                       <span className="font-medium text-gray-800">{pid}</span>
-                      <span className="text-sm text-gray-500 ml-2">({claims} claims)</span>
+                      <span className="text-sm text-gray-500 ml-2">({claims.length} claims)</span>
                     </div>
                   </label>
                 );
@@ -243,7 +267,7 @@ export default function SynthesisView() {
 
             {/* Progress bar */}
             {loading && (
-              <div className="w-full bg-gray-200 h-2 rounded mt-4">
+              <div className="w-full bg-gray-200 h-2 rounded mt-4 overflow-hidden">
                 <div
                   className="bg-blue-600 h-2 rounded transition-all"
                   style={{ width: `${progress}%` }}
@@ -257,7 +281,7 @@ export default function SynthesisView() {
       {/* ---------- No synthesis yet ---------- */}
       {!synthesis && !loading && (
         <div className="text-center py-12 bg-gray-50 rounded-xl">
-          <p className="text-gray-500 text-lg">Select papers and click “Synthesize”</p>
+          <p className="text-gray-500 text-lg">Select papers and click "Synthesize"</p>
         </div>
       )}
 
@@ -304,7 +328,7 @@ export default function SynthesisView() {
           <div className="flex justify-between gap-4 mt-12">
             <button
               onClick={() => navigate(`/analyze/${selectedPapers[0]}?session=${sessionId}`)}
-              className="px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+              className="px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 font-medium"
             >
               ← Back to Analysis
             </button>
@@ -312,14 +336,14 @@ export default function SynthesisView() {
             <div className="flex gap-4">
               <button
                 onClick={() => navigate(`/evaluation/${sessionId}`)}
-                className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+                className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium"
               >
                 View Evaluation Report
               </button>
 
               <button
                 onClick={() => downloadJSON(synthesis, `synthesis_${sessionId}.json`)}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
               >
                 📥 Export JSON
               </button>
