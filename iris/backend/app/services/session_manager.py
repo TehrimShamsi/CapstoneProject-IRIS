@@ -234,6 +234,11 @@ class SessionManager:
         except FileNotFoundError:
             return None
 
+    def save_session(self, session_id: str, session: Dict[str, Any]) -> None:
+        """Save session data"""
+        session["updated_at"] = iso_now()
+        self._atomic_write(self._session_path(session_id), session)
+
     # ---------------------------------------------------------
     # Search / Query Methods
     # ---------------------------------------------------------

@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getEvaluationReport } from "../services/api";
 import { Chart, registerables } from "chart.js";
 Chart.register(...registerables);
 
 export default function EvaluationReport() {
+  const navigate = useNavigate();
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -15,7 +17,9 @@ export default function EvaluationReport() {
   async function loadReport() {
     try {
       const data = await getEvaluationReport();
-      setReport(data);
+      // The API returns { report: {...} }, so unwrap it
+      const reportData = data.report || data;
+      setReport(reportData);
     } catch (err) {
       console.error(err);
       setError("Failed to load evaluation report");
@@ -76,91 +80,105 @@ export default function EvaluationReport() {
     );
   }
 
-  if (error) return <p className="text-center text-red-500 mt-20">{error}</p>;
+  if (error) return (
+    <div className="max-w-2xl mx-auto mt-20 p-6 bg-red-50 border border-red-200 rounded-xl">
+      <h2 className="text-xl font-bold text-red-700">Error</h2>
+      <p className="text-red-600 mt-2">{error}</p>
+    </div>
+  );
 
-  const provenanceLabels = Object.keys(report?.provenance_coverage || {});
-  const provenanceValues = Object.values(report?.provenance_coverage || {});
+  if (!report) {
+    return (
+      <div className="max-w-2xl mx-auto mt-20 p-6 bg-yellow-50 border border-yellow-200 rounded-xl">
+        <h2 className="text-xl font-bold text-yellow-700">No Report Available</h2>
+        <p className="text-yellow-600 mt-2">Analyze and synthesize papers first to generate an evaluation report.</p>
+      </div>
+    );
+  }
 
-  // Render chart after DOM loads
-  useEffect(() => {
-    if (provenanceLabels.length) {
-      renderBarChart(
-        "provChart",
-        provenanceLabels,
-        provenanceValues,
-        "Provenance Coverage"
-      );
-    }
-  }, [report]);
+  const summary = report?.summary || {};
+  const analyses = report?.analyses || [];
+  const synthesis = report?.synthesis || {};
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-12">
+      {/* Home Icon Button */}
+      <button
+        onClick={() => navigate("/")}
+        className="mb-6 p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        title="Go to Home"
+      >
+        🏠
+      </button>
+
       <div className="flex items-center justify-between mb-8">
         <h1 className="text-3xl font-bold">Evaluation Report</h1>
 
         <div className="flex gap-3">
           <button
             onClick={downloadJSON}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
             Download JSON
-          </button>
-          <button
-            onClick={downloadPDF}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg"
-          >
-            Download PDF
           </button>
         </div>
       </div>
 
-      {/* Claim quality */}
-      <div className="bg-white p-6 rounded-xl shadow mb-6">
-        <h2 className="text-xl font-semibold mb-4">Claim Quality</h2>
-        <p className="text-gray-700">
-          Average Score: <b>{report.claim_quality?.average_score ?? "—"}</b>
-        </p>
-        <p className="text-gray-700">
-          Total Claims Evaluated: <b>{report.claim_quality?.count ?? "—"}</b>
-        </p>
+      {/* Summary Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <div className="bg-white p-6 rounded-xl shadow">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Overview</h3>
+          <p className="text-gray-700 mb-2">Papers Analyzed: <b>{summary.total_papers || 0}</b></p>
+          <p className="text-gray-700 mb-2">Total Claims: <b>{summary.total_claims || 0}</b></p>
+          <p className="text-gray-700 mb-2">Avg Provenance Coverage: <b>{(summary.avg_provenance_coverage * 100).toFixed(1)}%</b></p>
+          <p className="text-gray-700">Avg Claim Confidence: <b>{(summary.avg_claim_confidence * 100).toFixed(1)}%</b></p>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Hallucination Risk</h3>
+          <p className="text-gray-700 mb-4">
+            Hallucinated Claims: <b className="text-red-600">{summary.total_hallucinated_claims || 0}</b>
+          </p>
+          <p className="text-sm text-gray-500">
+            Low-confidence claims without provenance are flagged as potential hallucinations.
+          </p>
+        </div>
       </div>
 
-      {/* Hallucination */}
-      <div className="bg-white p-6 rounded-xl shadow mb-6">
-        <h2 className="text-xl font-semibold mb-4">Hallucination Probability</h2>
-        <p className="text-gray-700 text-lg">
-          Possible Hallucination Rate:{" "}
-          <b>{(report.hallucination_rate * 100).toFixed(2)}%</b>
-        </p>
+      {/* Synthesis Results */}
+      <div className="bg-white p-6 rounded-xl shadow mb-8">
+        <h2 className="text-2xl font-semibold mb-4">Synthesis Analysis</h2>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-green-50 p-4 rounded-lg">
+            <p className="text-green-700 text-sm">Consensus Statements Found</p>
+            <p className="text-3xl font-bold text-green-600">{synthesis.num_consensus || 0}</p>
+          </div>
+          <div className="bg-red-50 p-4 rounded-lg">
+            <p className="text-red-700 text-sm">Contradictions Found</p>
+            <p className="text-3xl font-bold text-red-600">{synthesis.num_contradictions || 0}</p>
+          </div>
+        </div>
       </div>
 
-      {/* Provenance Chart */}
-      <div className="bg-white p-6 rounded-xl shadow mb-6">
-        <h2 className="text-xl font-semibold mb-4">Provenance Coverage</h2>
-        <canvas id="provChart" className="w-full h-64"></canvas>
-      </div>
-
-      {/* Confidence */}
-      <div className="bg-white p-6 rounded-xl shadow mb-6">
-        <h2 className="text-xl font-semibold mb-4">Confidence Summary</h2>
-        <p className="text-gray-700">
-          Avg Confidence: <b>{report.avg_confidence?.toFixed(2)}</b>
-        </p>
-        <p className="text-gray-700">
-          Min Confidence: <b>{report.min_confidence?.toFixed(2)}</b>
-        </p>
-        <p className="text-gray-700">
-          Max Confidence: <b>{report.max_confidence?.toFixed(2)}</b>
-        </p>
-      </div>
-
-      {/* Raw JSON */}
-      <div className="bg-white p-6 rounded-xl shadow">
-        <h2 className="text-xl font-semibold mb-4">Raw Output (Debug)</h2>
-        <pre className="text-sm bg-gray-100 p-3 rounded overflow-auto max-h-72">
-          {JSON.stringify(report, null, 2)}
-        </pre>
-      </div>
+      {/* Per-Paper Analysis Details */}
+      {analyses.length > 0 && (
+        <div className="bg-white p-6 rounded-xl shadow mb-8">
+          <h2 className="text-xl font-semibold mb-4">Per-Paper Analysis</h2>
+          <div className="space-y-4">
+            {analyses.map((analysis, i) => (
+              <div key={i} className="border-l-4 border-blue-500 pl-4 py-2">
+                <p className="text-sm text-gray-500">{analysis.paper_id}</p>
+                <div className="flex gap-6 mt-2 text-sm">
+                  <span>Claims: <b>{analysis.total_claims}</b></span>
+                  <span>Provenance: <b>{(analysis.provenance_coverage * 100).toFixed(0)}%</b></span>
+                  <span>Avg Confidence: <b>{(analysis.avg_claim_confidence * 100).toFixed(0)}%</b></span>
+                  <span className="text-red-600">Hallucinated: <b>{analysis.hallucinated_claims}</b></span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

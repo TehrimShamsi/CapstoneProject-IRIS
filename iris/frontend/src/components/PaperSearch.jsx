@@ -75,10 +75,18 @@ export default function PaperSearch() {
       const downloadRes = await downloadArxivPaper(arxivId);
       
       // Create or use existing session
-      let sid = sessionId;
+      // Prefer session query param, else fall back to persisted session id
+      let sid = sessionId || window.localStorage.getItem("iris_session_id");
       if (!sid) {
         const sessionRes = await createSession();
         sid = sessionRes.session_id;
+      }
+
+      // Persist session id so subsequent flows reuse the same session
+      try {
+        window.localStorage.setItem("iris_session_id", sid);
+      } catch (err) {
+        console.warn("Failed to persist session id to localStorage", err);
       }
 
       // Navigate to analysis
@@ -150,6 +158,15 @@ export default function PaperSearch() {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
+      {/* Home Icon Button */}
+      <button
+        onClick={() => navigate("/")}
+        className="mb-6 p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        title="Go to Home"
+      >
+        🏠
+      </button>
+
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2">Discover Research Papers</h1>
         <p className="text-gray-600">Search ArXiv or explore trending and suggested papers</p>

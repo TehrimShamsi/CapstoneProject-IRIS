@@ -1,7 +1,7 @@
 // frontend/src/components/SynthesisView.jsx
 import { useEffect, useState, useMemo } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { getSession, synthesizePapers } from "../services/api";
+import { getSession, synthesizePapers, deletePaper, deleteSession } from "../services/api";
 
 export default function SynthesisView() {
   const [searchParams] = useSearchParams();
@@ -18,6 +18,7 @@ export default function SynthesisView() {
   const [retryCount, setRetryCount] = useState(0);
 
   const [error, setError] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // null | "paper:<id>" | "session"
 
   // -----------------------------
   // Load session on mount
@@ -176,6 +177,43 @@ export default function SynthesisView() {
   }, [session, selectedPapers]);
 
   // ─────────────────────────────────────────────
+  // Delete handlers
+  // ─────────────────────────────────────────────
+  const handleDeletePaper = async (paperId) => {
+    try {
+      await deletePaper(sessionId, paperId);
+      
+      // Remove from selectedPapers and refresh session
+      setSelectedPapers(prev => prev.filter(p => p !== paperId));
+      
+      // Clear synthesis since papers changed
+      setSynthesis(null);
+      
+      // Reload session
+      const updatedSession = await getSession(sessionId);
+      setSession(updatedSession);
+      
+      setDeleteConfirm(null);
+      setError("");
+    } catch (err) {
+      console.error("Failed to delete paper:", err);
+      setError(`Failed to delete paper: ${err.message}`);
+    }
+  };
+
+  const handleDeleteSession = async () => {
+    try {
+      await deleteSession(sessionId);
+      setDeleteConfirm(null);
+      // Redirect to home
+      navigate("/");
+    } catch (err) {
+      console.error("Failed to delete session:", err);
+      setError(`Failed to delete session: ${err.message}`);
+    }
+  };
+
+  // ─────────────────────────────────────────────
   // Loading state
   // ─────────────────────────────────────────────
   if (sessionLoading) {
@@ -213,6 +251,14 @@ export default function SynthesisView() {
   // ─────────────────────────────────────────────
   return (
     <div className="max-w-6xl mx-auto py-10 px-6">
+      {/* Home Icon Button */}
+      <button
+        onClick={() => navigate("/")}
+        className="mb-6 p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        title="Go to Home"
+      >
+        🏠
+      </button>
 
       <h1 className="text-3xl font-bold mb-2">Multi-Paper Synthesis</h1>
       <p className="text-gray-600 mb-8">
@@ -235,9 +281,9 @@ export default function SynthesisView() {
                   const claims = paperData?.analysis?.claims || [];
                   const title = paperData?.title || pid;
                   return (
-                    <label
+                    <div
                       key={pid}
-                      className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer"
+                      className="flex items-center gap-2 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 group"
                     >
                       <input
                         type="checkbox"
@@ -250,7 +296,14 @@ export default function SynthesisView() {
                         <span className="text-sm text-gray-500 ml-2">({claims.length} claims)</span>
                         <div className="text-xs text-gray-400 mt-1">ID: <span className="font-mono">{pid}</span></div>
                       </div>
-                    </label>
+                      <button
+                        onClick={() => setDeleteConfirm(`paper:${pid}`)}
+                        className="opacity-0 group-hover:opacity-100 px-3 py-1 text-red-600 hover:bg-red-50 rounded transition"
+                        title="Delete this paper"
+                      >
+                        🗑️
+                      </button>
+                    </div>
                   );
                 })}
             </div>
@@ -373,9 +426,67 @@ export default function SynthesisView() {
               >
                 📥 Export JSON
               </button>
+
+              <button
+                onClick={() => setDeleteConfirm("session")}
+                className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+              >
+                🗑️ Delete Session
+              </button>
             </div>
           </div>
         </>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white p-8 rounded-xl shadow-lg max-w-md">
+            {deleteConfirm.startsWith("paper:") ? (
+              <>
+                <h3 className="text-xl font-bold text-red-600 mb-4">Delete Paper?</h3>
+                <p className="text-gray-700 mb-6">
+                  Are you sure you want to delete this paper? The synthesis results will be cleared.
+                </p>
+                <div className="flex gap-4">
+                  <button
+                    onClick={() => setDeleteConfirm(null)}
+                    className="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleDeletePaper(deleteConfirm.split(":")[1])}
+                    className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-xl font-bold text-red-600 mb-4">Delete Entire Session?</h3>
+                <p className="text-gray-700 mb-6">
+                  This will permanently delete the session and all associated papers and analyses. This cannot be undone.
+                </p>
+                <div className="flex gap-4">
+                  <button
+                    onClick={() => setDeleteConfirm(null)}
+                    className="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeleteSession}
+                    className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

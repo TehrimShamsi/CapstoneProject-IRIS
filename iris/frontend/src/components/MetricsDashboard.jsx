@@ -1,8 +1,10 @@
 // frontend/src/components/MetricsDashboard.jsx
 import React, { useEffect, useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { getMetrics } from "../services/api";
 
 export default function MetricsDashboard() {
+  const navigate = useNavigate();
   const [metrics, setMetrics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -224,6 +226,15 @@ export default function MetricsDashboard() {
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-10">
+      {/* Home Icon Button */}
+      <button
+        onClick={() => navigate("/")}
+        className="mb-6 p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        title="Go to Home"
+      >
+        🏠
+      </button>
+
       <div className="flex items-start justify-between gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold">Observability & Metrics</h1>

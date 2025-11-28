@@ -75,10 +75,11 @@ class AnalysisAgent:
                 claim_obj = {
                     "claim_id": f"{paper_id}_claim_{i}",
                     "text": claim_data.get("text"),
-                    "confidence": float(claim_data.get("confidence", 0.0)),
+                        "confidence": float(claim_data.get("confidence", 0.0)),
                     "provenance": claim_data.get("provenance", [f"chunk_{i}"]),
                     "methods": claim_data.get("methods", []),
                     "metrics": claim_data.get("metrics", []),
+                        "used_fallback": bool(claim_data.get("used_fallback", False)),
                 }
                 claims.append(claim_obj)
 
@@ -87,7 +88,9 @@ class AnalysisAgent:
             "title": None,
             "num_chunks_analyzed": min(len(chunks), max_chunks),
             "num_claims": len(claims),
-            "claims": claims
+            "claims": claims,
+            # Indicate whether any claim came from the heuristic fallback
+            "used_fallback": any([c.get("used_fallback") for c in claims])
         }
         return analysis
 
@@ -156,6 +159,8 @@ Return JSON ONLY.
             parsed.setdefault("provenance", [f"chunk_{chunk_id}"])
             parsed.setdefault("methods", parsed.get("methods") or [])
             parsed.setdefault("metrics", parsed.get("metrics") or [])
+            # Mark that this claim was produced by the model (not fallback)
+            parsed.setdefault("used_fallback", False)
             # normalize confidence
             try:
                 parsed["confidence"] = float(parsed.get("confidence", 0.0))
@@ -170,11 +175,57 @@ Return JSON ONLY.
         """
         Conservative fallback: return a short first-sentence claim with low confidence.
         """
-        first_sentence = text.split(".")[0].strip() if "." in text else text[:200].strip()
+        import re
+
+        # Break into candidate sentences (simple regex-based split)
+        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+
+        # Choose a primary claim sentence (first reasonably long sentence)
+        primary = None
+        for s in sents:
+            if len(s) > 30:
+                primary = s
+                break
+        if not primary:
+            primary = sents[0] if sents else text[:200].strip()
+
+        # Heuristic method detection (common model names / keywords)
+        method_keywords = [
+            r'BERT', r'RoBERTa', r'Transformer', r'Transformers', r'CNN', r'RNN', r'LSTM',
+            r'GAN', r'SVM', r'reinforcement learning', r'deep learning', r'self-supervised',
+            r'contrastive', r'fine-tun', r'pre-train', r'token', r'encoder', r'decoder'
+        ]
+
+        methods_found = set()
+        for kw in method_keywords:
+            try:
+                if re.search(kw, text, flags=re.IGNORECASE):
+                    methods_found.add(re.sub(r'\\W+$', '', kw))
+            except re.error:
+                continue
+
+        # Heuristic metric detection (percentages and metric keywords)
+        metrics_found = set()
+        # percentages like 92.5% or 92 %
+        for m in re.findall(r"\b\d{1,3}(?:\.\d+)?\s?%", text):
+            metrics_found.add(m.strip())
+        for metric_kw in [r'accuracy', r'f1', r'precision', r'recall', r'auc', r'mse', r'rmse']:
+            if re.search(metric_kw, text, flags=re.IGNORECASE):
+                metrics_found.add(metric_kw)
+
+        # Adjust confidence slightly if methods or metrics were found
+        confidence = 0.35
+        if methods_found and metrics_found:
+            confidence = 0.55
+        elif methods_found or metrics_found:
+            confidence = 0.45
+
         return {
-            "text": first_sentence,
-            "confidence": 0.35,
+            "text": primary,
+            "confidence": confidence,
             "provenance": [f"chunk_{chunk_id}"],
-            "methods": [],
-            "metrics": []
+            "methods": list(methods_found),
+            "metrics": list(metrics_found),
+            # Indicate this claim was produced by the heuristic fallback
+            "used_fallback": True
         }

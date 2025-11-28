@@ -123,3 +123,17 @@ export async function downloadArxivPaper(arxivId) {
   });
   return res.data;
 }
+
+// ===== DELETE FUNCTIONS =====
+
+// Delete a paper from a session
+export async function deletePaper(sessionId, paperId) {
+  const res = await api.delete(`/session/${sessionId}/paper/${paperId}`);
+  return res.data;
+}
+
+// Delete an entire session
+export async function deleteSession(sessionId) {
+  const res = await api.delete(`/session/${sessionId}`);
+  return res.data;
+}

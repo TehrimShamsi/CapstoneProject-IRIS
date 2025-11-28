@@ -12,6 +12,7 @@ export default function AnalysisView() {
   const [loading, setLoading] = useState(true);
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState(null);
+  const [progress, setProgress] = useState(0);
 
   // ─────────────────────────────────────────────
   // Polling until backend finishes analysis
@@ -35,6 +36,9 @@ export default function AnalysisView() {
           
           const interval = setInterval(async () => {
             pollCount++;
+            // Update progress percentage (0-95%)
+            const percentage = Math.min((pollCount / maxPolls) * 95, 95);
+            setProgress(percentage);
             
             try {
               const sessionData = await getSession(sessionId);
@@ -43,10 +47,12 @@ export default function AnalysisView() {
               // then fall back to legacy `analysis_results[paperId]`.
               if (sessionData.papers?.[paperId]?.analysis) {
                 clearInterval(interval);
+                setProgress(100);
                 setAnalysis(sessionData.papers[paperId].analysis);
                 setLoading(false);
               } else if (sessionData.analysis_results?.[paperId]) {
                 clearInterval(interval);
+                setProgress(100);
                 setAnalysis(sessionData.analysis_results[paperId]);
                 setLoading(false);
               } else if (pollCount >= maxPolls) {
@@ -85,8 +91,21 @@ export default function AnalysisView() {
       <div className="flex flex-col items-center justify-center mt-20">
         <div className="h-10 w-10 border-4 border-blue-600 border-b-transparent rounded-full animate-spin"></div>
         <p className="mt-4 text-blue-700 font-medium">
-          Analyzing paper… this may take a few seconds
+          Analyzing paper… Please wait
         </p>
+        {/* Percentage Loader */}
+        <div className="mt-8 w-80">
+          <div className="bg-gray-200 rounded-full h-2 overflow-hidden">
+            <div 
+              className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+              style={{ width: `${progress}%` }}
+            ></div>
+          </div>
+          <div className="flex justify-between items-center mt-3">
+            <p className="text-sm text-gray-600">Processing document...</p>
+            <p className="text-sm font-semibold text-blue-600">{Math.round(progress)}%</p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -112,7 +131,7 @@ export default function AnalysisView() {
   // ─────────────────────────────────────────────
   // Parse backend results
   // ─────────────────────────────────────────────
-  const { num_claims, claims = [] } = analysis || {};
+  const { num_claims, claims = [], used_fallback = false } = analysis || {};
 
   // Collect all methods + metrics across claims
   const allMethods = [...new Set(claims.flatMap((c) => c.methods || []))];
@@ -123,6 +142,15 @@ export default function AnalysisView() {
   // ─────────────────────────────────────────────
   return (
     <div className="max-w-4xl mx-auto p-6">
+      {/* Home Icon Button */}
+      <button
+        onClick={() => navigate("/")}
+        className="mb-6 p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+        title="Go to Home"
+      >
+        🏠
+      </button>
+
       <h1 className="text-3xl font-bold text-gray-800 mb-6">
         Paper Analysis
       </h1>

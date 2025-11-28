@@ -106,8 +106,12 @@ Claims:
 Return JSON only.
 """
 
-        consensus = self._call_gemini_json(consensus_prompt, default=[])
-        contradictions = self._call_gemini_json(contradictions_prompt, default=[])
+        consensus = self._call_gemini_json(consensus_prompt, default=None)
+        contradictions = self._call_gemini_json(contradictions_prompt, default=None)
+
+        # If Gemini isn't available or returned nothing, fall back to a lightweight heuristic
+        if consensus is None or contradictions is None:
+            consensus, contradictions = self._heuristic_synthesis(claims_for_prompt)
 
         result = {
             "num_papers": len(analyses),
@@ -138,3 +142,67 @@ Return JSON only.
             return parsed
         except Exception:
             return default
+
+    def _heuristic_synthesis(self, claims: List[Dict[str, str]]):
+        """
+        Lightweight heuristic synthesizer used when Gemini is unavailable.
+        - Consensus: find claim texts that share >=3 normalized tokens across different papers.
+        - Contradictions: detect simple polarity contradictions (contains 'increase' vs 'decrease', 'improve' vs 'worse'),
+          or explicit negation differences between similar claims.
+        This is intentionally simple but useful for local dev when the model is not available.
+        """
+        import re
+        from collections import defaultdict
+
+        def normalize(text):
+            t = text.lower()
+            t = re.sub(r"[^a-z0-9\s]", " ", t)
+            toks = [w for w in t.split() if len(w) > 2]
+            return toks
+
+        # Build token sets per claim
+        token_sets = []
+        for c in claims:
+            toks = set(normalize(c.get("text", "")))
+            token_sets.append((c.get("paper_id"), c.get("claim_id"), c.get("text", ""), toks))
+
+        # Consensus: if two claims from different papers share >=3 tokens
+        consensus_map = {}
+        for i in range(len(token_sets)):
+            pid_i, cid_i, text_i, toks_i = token_sets[i]
+            for j in range(i + 1, len(token_sets)):
+                pid_j, cid_j, text_j, toks_j = token_sets[j]
+                if pid_i == pid_j:
+                    continue
+                common = toks_i & toks_j
+                if len(common) >= 3:
+                    key = ' || '.join(sorted([pid_i, pid_j])) + ' :: ' + ' / '.join(sorted(list(common))[:5])
+                    if key not in consensus_map:
+                        consensus_map[key] = {
+                            "text": f"{text_i} / {text_j}",
+                            "papers": sorted([pid_i, pid_j]),
+                            "average_confidence": 0.5
+                        }
+
+        consensus = list(consensus_map.values())
+
+        # Contradictions: simple polarity check
+        polarity_pairs = [ ("increase","decrease"), ("improve","worse"), ("higher","lower"), ("positive","negative") ]
+        contradictions = []
+        for i in range(len(token_sets)):
+            pid_i, cid_i, text_i, toks_i = token_sets[i]
+            for j in range(i + 1, len(token_sets)):
+                pid_j, cid_j, text_j, toks_j = token_sets[j]
+                if pid_i == pid_j:
+                    continue
+                for a,b in polarity_pairs:
+                    if (a in ' '.join(toks_i) and b in ' '.join(toks_j)) or (b in ' '.join(toks_i) and a in ' '.join(toks_j)):
+                        contradictions.append({
+                            "claim_a": text_i,
+                            "paper_a": pid_i,
+                            "claim_b": text_j,
+                            "paper_b": pid_j
+                        })
+                        break
+
+        return consensus, contradictions

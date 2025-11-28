@@ -120,6 +120,70 @@ async def get_session(session_id: str):
     return data
 
 
+# ===== DELETE ENDPOINTS =====
+# Delete a paper from a session
+# ----
+@router.delete("/session/{session_id}/paper/{paper_id}")
+async def delete_paper(session_id: str, paper_id: str):
+    """Delete a specific paper from a session"""
+    try:
+        session = session_manager.load_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        if "papers" not in session or paper_id not in session["papers"]:
+            raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found in session")
+        
+        # Remove the paper from session
+        del session["papers"][paper_id]
+        
+        # Clear synthesis result since papers have changed
+        session["synthesis_result"] = None
+        
+        # Save updated session
+        session_manager.save_session(session_id, session)
+        
+        logger.info(f"Deleted paper {paper_id} from session {session_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Paper {paper_id} deleted",
+            "session_id": session_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting paper: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Delete an entire session
+# ----
+@router.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    """Delete an entire session"""
+    try:
+        session = session_manager.load_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Delete the session file
+        session_manager.delete_session(session_id)
+        
+        logger.info(f"Deleted session {session_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Session {session_id} deleted",
+            "session_id": session_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # -----------------------------
 # Observability Metrics
 # -----------------------------
@@ -137,13 +201,31 @@ async def evaluation(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    analyses = session.get("analysis_results", {})
+    # Get analyses (prefer new papers shape, fallback to legacy analysis_results)
+    analyses_dict = {}
+    if session.get("papers"):
+        for pid, paper_data in session["papers"].items():
+            if paper_data.get("analysis"):
+                analyses_dict[pid] = paper_data["analysis"]
+    
+    if not analyses_dict:
+        analyses_dict = session.get("analysis_results", {})
+    
     synthesis = session.get("synthesis_result", {})
 
-    report = evaluator.generate_report(
-        list(analyses.values()),
-        synthesis
-    )
+    # Evaluate each analysis to get metrics
+    analyses_metrics = []
+    for pid, analysis in analyses_dict.items():
+        try:
+            metrics = evaluator.evaluate_analysis(analysis)
+            analyses_metrics.append(metrics)
+        except Exception as e:
+            logger.error(f"Failed to evaluate analysis for {pid}: {e}")
+            # Skip this analysis if evaluation fails
+            continue
+
+    # Generate the combined report
+    report = evaluator.generate_report(analyses_metrics, synthesis)
 
     return EvaluationResponse(report=report)
 
