@@ -3,112 +3,155 @@ from typing import List, Dict, Any, Optional
 import arxiv
 from app.tools.arxiv_fetcher import ArxivFetcher
 from app.utils.observability import agent_call, logger
+from typing import List, Dict, Any, Optional
+from app.tools.arxiv_fetcher import ArxivFetcher
+from app.utils.observability import agent_call, logger
+import arxiv
 
 class SearchAgent:
     """
-    Agent responsible for searching and discovering papers from ArXiv.
-    Provides smart suggestions based on session context and trending papers.
+    Agent responsible for searching and discovering research papers.
+    
+    Features:
+    - Search ArXiv by keyword
+    - Get trending papers by category
+    - Smart paper suggestions based on session history
     """
     
     def __init__(self):
         self.fetcher = ArxivFetcher()
-        
+    
     @agent_call("SearchAgent")
-    def search_papers(self, query: str, max_results: int = 10, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search_papers(
+        self, 
+        query: str, 
+        max_results: int = 10,
+        trace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Search for papers on ArXiv based on a query.
+        Search for papers on ArXiv.
         
         Args:
             query: Search query string
-            max_results: Maximum number of results to return
-            trace_id: Optional trace ID for observability
-            
-        Returns:
-            List of paper metadata dictionaries
-        """
-        logger.info(f"Searching ArXiv for: {query}")
-        
-        try:
-            results = self.fetcher.search(query, max_results=max_results)
-            return results
-        except Exception as e:
-            logger.error(f"Search failed for query '{query}': {e}")
-            raise
-    
-    @agent_call("SearchAgent")
-    def get_trending_papers(self, category: str = "cs.AI", max_results: int = 10, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Get recently published trending papers from a category.
-        
-        Args:
-            category: ArXiv category (cs.AI, cs.LG, cs.CL, etc.)
             max_results: Maximum number of results
             trace_id: Optional trace ID for observability
             
         Returns:
-            List of paper metadata dictionaries
+            Dictionary with search results and metadata
+        """
+        try:
+            results = self.fetcher.search(query, max_results=max_results)
+            
+            return {
+                "query": query,
+                "total_results": len(results),
+                "papers": results,
+                "status": "success"
+            }
+        except Exception as e:
+            logger.error(f"Search failed for query '{query}': {str(e)}")
+            return {
+                "query": query,
+                "total_results": 0,
+                "papers": [],
+                "status": "error",
+                "error": str(e)
+            }
+    
+    @agent_call("SearchAgent")
+    def get_trending_papers(
+        self,
+        category: str = "cs.AI",
+        max_results: int = 10,
+        trace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Get trending papers in a specific category.
+        
+        Args:
+            category: ArXiv category code (e.g., "cs.AI", "cs.LG", "cs.CL")
+            max_results: Maximum number of results
+            trace_id: Optional trace ID for observability
+            
+        Returns:
+            Dictionary with trending papers
         """
         logger.info(f"Fetching trending papers from {category}")
         
         try:
-            results = self.fetcher.get_trending_papers(category, max_results)
-            return results
+            papers = self.fetcher.get_trending_papers(
+                category=category,
+                max_results=max_results
+            )
+            
+            return {
+                "category": category,
+                "total_results": len(papers),
+                "papers": papers,
+                "status": "success"
+            }
         except Exception as e:
-            logger.error(f"Failed to fetch trending papers: {e}")
-            return []  # Return empty list on error
+            logger.error(f"Failed to get trending papers: {str(e)}")
+            return {
+                "category": category,
+                "total_results": 0,
+                "papers": [],
+                "status": "error",
+                "error": str(e)
+            }
     
     @agent_call("SearchAgent")
-    def suggest_papers(self, session_context: Dict[str, Any], max_suggestions: int = 8, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def suggest_papers(
+        self,
+        session_id: str = "unknown",
+        max_suggestions: int = 8,
+        trace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Generate smart paper suggestions based on session context.
+        Generate smart paper suggestions.
+        
+        For now, returns trending papers. In the future, this could
+        be enhanced with collaborative filtering, user preferences, etc.
         
         Args:
-            session_context: Dictionary containing session info (papers, analyses, etc.)
+            session_id: User session ID (for future personalization)
             max_suggestions: Maximum number of suggestions
             trace_id: Optional trace ID for observability
             
         Returns:
-            List of suggested papers
+            Dictionary with suggested papers
         """
-        logger.info(f"Generating smart suggestions for session {session_context.get('session_id', 'unknown')}")
+        logger.info(f"Generating smart suggestions for session {session_id}")
         
-        suggestions = []
+        # For now, return trending AI papers
+        # TODO: Implement personalized recommendations based on:
+        # - Papers user has already analyzed
+        # - Citation networks
+        # - Topic modeling
         
-        # Strategy 1: If session has analyzed papers, find related work
-        analyzed_papers = session_context.get("papers", [])
-        if analyzed_papers:
-            # Get categories from existing papers
-            categories = self._extract_categories_from_session(session_context)
-            if categories:
-                # Search for papers in similar categories
-                for category in categories[:2]:  # Limit to top 2 categories
-                    try:
-                        related = self.fetcher.get_trending_papers(category, max_results=4)
-                        suggestions.extend(related)
-                    except Exception as e:
-                        logger.warning(f"Could not fetch papers for category {category}: {e}")
+        trending = self.get_trending_papers(
+            category="cs.AI",
+            max_results=max_suggestions
+        )
         
-        # Strategy 2: If no papers yet, show popular recent papers
-        if not suggestions:
-            try:
-                suggestions = self.fetcher.get_trending_papers("cs.AI", max_results=max_suggestions)
-            except Exception as e:
-                logger.error(f"Error fetching trending papers: {e}")
-                suggestions = []
-        
-        # Deduplicate and limit
+        # Add uniqueness check
+        unique_papers = []
         seen_ids = set()
-        unique_suggestions = []
-        for paper in suggestions:
+        
+        for paper in trending.get("papers", []):
             paper_id = paper.get("arxiv_id")
             if paper_id and paper_id not in seen_ids:
                 seen_ids.add(paper_id)
-                unique_suggestions.append(paper)
-                if len(unique_suggestions) >= max_suggestions:
-                    break
+                unique_papers.append(paper)
         
-        logger.info(f"Generated {len(unique_suggestions)} unique suggestions")
-        return unique_suggestions
+        logger.info(f"Generated {len(unique_papers)} unique suggestions")
+        
+        return {
+            "session_id": session_id,
+            "total_suggestions": len(unique_papers),
+            "suggestions": unique_papers,
+            "status": "success"
+        }
     
     @agent_call("SearchAgent")
     def search_by_author(self, author_name: str, max_results: int = 10, trace_id: Optional[str] = None) -> List[Dict[str, Any]]:

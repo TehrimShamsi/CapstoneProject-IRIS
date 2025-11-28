@@ -1,11 +1,10 @@
+# iris/backend/app/agents/orchestrator.py
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any
 from app.agents.analysis_agent import AnalysisAgent
 from app.agents.synthesis_agent import SynthesisAgent
 from app.agents.fetch_agent import FetchAgent
 from app.agents.loop_refinement_agent import LoopRefinementAgent
 from app.utils.observability import logger
-
 
 class Orchestrator:
     def __init__(self, session_manager=None):
@@ -15,123 +14,111 @@ class Orchestrator:
         self.synthesis_agent = SynthesisAgent()
         self.loop_agent = LoopRefinementAgent()
 
-    def analyze_paper(self, session_id: str, paper_id: str) -> Dict[str, Any]:
+    def analyze_paper(self, session_id: str, paper_id: str):
         """
-        Analyze a single paper and store results in session.
-        
-        Args:
-            session_id: The session ID
-            paper_id: The paper ID to analyze
-            
-        Returns:
-            Analysis results dict
+        Analyze a single paper and store result in session.
+        Returns the analysis result immediately.
         """
-        logger.info(f"[ORCH] Starting single paper analysis: paper_id={paper_id}, session_id={session_id}")
+        from app.tools.arxiv_fetcher import ArxivFetcher
         
-        # Get the session to ensure it exists
-        if self.session_manager:
-            session = self.session_manager.load_session(session_id)
-            if not session:
-                raise ValueError(f"Session {session_id} not found")
+        logger.info(f"[ORCH] Starting analysis for paper: {paper_id}")
         
-        # Get the PDF path - it should have been saved during upload
-        from app.tools.pdf_processor import PDFProcessor
-        pdf_processor = PDFProcessor()
-        pdf_path = pdf_processor.base / f"{paper_id}.pdf"
+        fetcher = ArxivFetcher()
         
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF not found at {pdf_path}")
-        
-        logger.info(f"[ORCH] Found PDF at {pdf_path}")
-        
-        # Run analysis
         try:
-            analysis = self.analysis_agent.analyze(paper_id, str(pdf_path))
-            logger.info(f"[ORCH] Analysis complete for {paper_id}: {len(analysis.get('claims', []))} claims extracted")
+            # Ensure we have the PDF
+            pdf_path = fetcher.fetch(paper_id)
+            logger.info(f"[ORCH] PDF fetched: {pdf_path}")
+            
+            # Run analysis
+            analysis_result = self.analysis_agent.analyze(paper_id, pdf_path)
+            logger.info(f"[ORCH] Analysis complete for {paper_id}: {analysis_result.get('num_claims', 0)} claims extracted")
+            
+            # Store in session using SessionManager helper (keeps papers mapping consistent)
+            if self.session_manager:
+                try:
+                    self.session_manager.add_paper_to_session(session_id, paper_id, analysis_result)
+                    logger.info(f"[ORCH] Analysis stored in session {session_id} under papers.{paper_id}")
+                except Exception as se:
+                    # Fallback: if add_paper_to_session fails, write to legacy analysis_results
+                    logger.warning(f"Failed to add paper to session via SessionManager: {se}. Falling back to analysis_results storage.")
+                    session = self.session_manager.get_session(session_id)
+                    if "analysis_results" not in session:
+                        session["analysis_results"] = {}
+                    session["analysis_results"][paper_id] = analysis_result
+                    self.session_manager._atomic_write(
+                        self.session_manager._session_path(session_id),
+                        session
+                    )
+                    logger.info(f"[ORCH] Analysis stored in session {session_id} under analysis_results.{paper_id}")
+            
+            return {
+                "status": "success",
+                "paper_id": paper_id,
+                "analysis": analysis_result
+            }
+            
         except Exception as e:
             logger.error(f"[ORCH] Analysis failed for {paper_id}: {str(e)}")
             raise
-        
-        # Store in session
-        if self.session_manager:
-            try:
-                self.session_manager.add_paper_to_session(session_id, paper_id, analysis)
-                logger.info(f"[ORCH] Analysis stored in session {session_id}")
-            except Exception as e:
-                logger.error(f"[ORCH] Failed to store analysis in session: {str(e)}")
-                raise
-        
-        return analysis
 
-    def synthesize(self, session_id: str, paper_ids: list) -> Dict[str, Any]:
+    def synthesize(self, session_id: str, paper_ids: list):
         """
-        Synthesize multiple papers.
-        
-        Args:
-            session_id: The session ID
-            paper_ids: List of paper IDs to synthesize
-            
-        Returns:
-            Synthesis results dict
+        Synthesize multiple analyzed papers.
         """
-        logger.info(f"[ORCH] Starting synthesis for {len(paper_ids)} papers in session {session_id}")
+        logger.info(f"[ORCH] Starting synthesis for {len(paper_ids)} papers")
         
-        if self.session_manager:
-            session = self.session_manager.load_session(session_id)
-            if not session:
-                raise ValueError(f"Session {session_id} not found")
+        if not self.session_manager:
+            raise ValueError("SessionManager required for synthesis")
         
-        # Collect analyses from the session
+        session = self.session_manager.get_session(session_id)
         analyses = []
-        if self.session_manager:
-            session = self.session_manager.load_session(session_id)
-            for pid in paper_ids:
-                if pid in session.get("papers", {}):
-                    paper_data = session["papers"][pid]
-                    if "analysis" in paper_data:
-                        analyses.append(paper_data["analysis"])
+
+        # Collect analyses for selected papers — prefer `session['papers'][pid]['analysis']`
+        for paper_id in paper_ids:
+            paper_entry = session.get("papers", {}).get(paper_id)
+            if paper_entry and paper_entry.get("analysis"):
+                analyses.append(paper_entry.get("analysis"))
+                continue
+
+            # Fallback to legacy analysis_results key
+            if paper_id in session.get("analysis_results", {}):
+                analyses.append(session["analysis_results"][paper_id])
+            else:
+                logger.warning(f"[ORCH] Paper {paper_id} not found in session")
         
-        if not analyses:
-            logger.warning(f"[ORCH] No analyses found for papers {paper_ids}")
-            return {"num_papers": 0, "consensus": [], "contradictions": []}
+        if len(analyses) < 2:
+            raise ValueError("Need at least 2 analyzed papers for synthesis")
         
         # Run synthesis
-        try:
-            synthesis_output = self.synthesis_agent.synthesize(analyses)
-            logger.info(f"[ORCH] Synthesis complete: {len(synthesis_output.get('consensus', []))} consensus, {len(synthesis_output.get('contradictions', []))} contradictions")
-        except Exception as e:
-            logger.error(f"[ORCH] Synthesis failed: {str(e)}")
-            raise
+        synthesis_result = self.synthesis_agent.synthesize(analyses)
+        logger.info(f"[ORCH] Synthesis complete: {synthesis_result.get('num_consensus', 0)} consensus found")
         
-        # Store synthesis result in session
-        if self.session_manager:
-            try:
-                session = self.session_manager.load_session(session_id)
-                session["synthesis_result"] = synthesis_output
-                session["updated_at"] = self.session_manager.__class__.__dict__.get("iso_now", lambda: "")() if hasattr(self.session_manager, "iso_now") else None
-                self.session_manager._atomic_write(self.session_manager._session_path(session_id), session)
-                logger.info(f"[ORCH] Synthesis stored in session {session_id}")
-            except Exception as e:
-                logger.error(f"[ORCH] Failed to store synthesis in session: {str(e)}")
+        # Store synthesis result
+        session["synthesis_result"] = synthesis_result
+        self.session_manager._atomic_write(
+            self.session_manager._session_path(session_id), 
+            session
+        )
         
-        return synthesis_output
+        return synthesis_result
 
     def process_papers_parallel(self, arxiv_ids: list):
         """
-        Legacy method: Step 1: Fetch PDFs in parallel
+        Step 1: Fetch PDFs in parallel
         Step 2: Analyze each paper in parallel
         Step 3: Synthesize findings
         Step 4: Loop refine
         """
 
-        logger.info("\n[ORCH] Starting parallel processing...")
+        print("\n[ORCH] Starting parallel processing...")
 
         # --- Parallel Fetching ---
         with ThreadPoolExecutor(max_workers=3) as exe:
             fetch_jobs = [exe.submit(self.fetch_agent.fetch_and_extract, pid) for pid in arxiv_ids]
             fetch_results = [f.result() for f in fetch_jobs]
 
-        logger.info("[ORCH] Fetch complete.")
+        print("[ORCH] Fetch complete.")
 
         # --- Parallel Analysis ---
         from app.tools.arxiv_fetcher import ArxivFetcher
@@ -140,20 +127,21 @@ class Orchestrator:
         with ThreadPoolExecutor(max_workers=3) as exe:
             analysis_jobs = []
             for arxiv_id in arxiv_ids:
+                # ensure we have a local PDF path
                 pdf_path = fetcher.fetch(arxiv_id)
                 job = exe.submit(self.analysis_agent.analyze, arxiv_id, pdf_path)
                 analysis_jobs.append(job)
 
             analyses = [a.result() for a in analysis_jobs]
 
-        logger.info("[ORCH] Analysis complete.")
+        print("[ORCH] Analysis complete.")
 
         # --- Sequential Synthesis ---
         synthesis_output = self.synthesis_agent.synthesize(analyses)
-        logger.info("[ORCH] Synthesis complete.")
+        print("[ORCH] Synthesis complete.")
 
         # --- Loop Refinement ---
         refined_output = self.loop_agent.refine(synthesis_output)
-        logger.info("[ORCH] Loop refinement complete.")
+        print("[ORCH] Loop refinement complete.")
 
         return refined_output

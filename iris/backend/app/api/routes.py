@@ -1,8 +1,8 @@
 import uuid
 from typing import Optional
+import arxiv
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
-
 from app.tools.pdf_processor import PDFProcessor
 from app.tools.arxiv_fetcher import ArxivFetcher
 from app.services.session_manager import SessionManager
@@ -13,7 +13,7 @@ from app.utils.observability import get_metrics
 from app.utils.observability import logger
 
 from app.api.models import (
-    UploadPDFResponse, AnalyzeRequest, SynthesizeRequest, EvaluationResponse
+    FetchArxivRequest, UploadPDFResponse, AnalyzeRequest, SynthesizeRequest, EvaluationResponse
 )
 
 router = APIRouter()
@@ -25,7 +25,7 @@ fetcher = ArxivFetcher()
 evaluator = AgentEvaluator()
 search_agent = SearchAgent()
 
-
+    # NEW request models - add these
 # -----------------------------
 # PDF Upload
 # -----------------------------
@@ -147,11 +147,13 @@ async def search_arxiv(
     """
     try:
         logger.info(f"Searching ArXiv for: {query}")
-        results = search_agent.search_papers(query, max_results=max_results)
+        agent_res = search_agent.search_papers(query, max_results=max_results)
+        papers = agent_res.get("papers") if isinstance(agent_res, dict) else agent_res
+        papers = papers or []
         return {
             "query": query,
-            "count": len(results),
-            "papers": results
+            "count": len(papers),
+            "papers": papers
         }
     except Exception as e:
         logger.error(f"ArXiv search error: {e}")
@@ -178,11 +180,13 @@ async def trending_papers(
     """
     try:
         logger.info(f"Fetching trending papers from {category}")
-        results = search_agent.get_trending_papers(category, max_results=max_results)
+        agent_res = search_agent.get_trending_papers(category, max_results=max_results)
+        papers = agent_res.get("papers") if isinstance(agent_res, dict) else agent_res
+        papers = papers or []
         return {
             "category": category,
-            "count": len(results),
-            "papers": results
+            "count": len(papers),
+            "papers": papers
         }
     except Exception as e:
         logger.error(f"Trending papers error: {e}")
@@ -216,8 +220,10 @@ async def suggest_papers(
                 session_context = session
         
         # Generate suggestions
-        suggestions = search_agent.suggest_papers(session_context, max_suggestions=max_suggestions)
-        
+        agent_res = search_agent.suggest_papers(session_context, max_suggestions=max_suggestions)
+        suggestions = agent_res.get("suggestions") if isinstance(agent_res, dict) else agent_res
+        suggestions = suggestions or []
+
         return {
             "session_id": session_id,
             "count": len(suggestions),
@@ -330,257 +336,251 @@ async def download_arxiv_paper(arxiv_id: str):
     except Exception as e:
         logger.error(f"Download error for {arxiv_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-    
-    # NEW request models - add these
-    class FetchArxivRequest(BaseModel):
-        session_id: str
-        arxiv_id: str
+# -----------------------------
+# Fetch ArXiv Paper Endpoint
+# -----------------------------
+@router.post("/fetch_arxiv")
+async def fetch_arxiv_paper(request: FetchArxivRequest):
+    """Fetch a paper from ArXiv and add to session"""
+    try:
+        # Clean arxiv_id - remove version suffix for storage key
+        clean_id = request.arxiv_id.split('v')[0] if 'v' in request.arxiv_id else request.arxiv_id
 
-    class SuggestPapersRequest(BaseModel):
-        session_id: str
+        logger.info(f"Fetching ArXiv paper {request.arxiv_id} (clean: {clean_id}) for session {request.session_id}")
 
+        # Fetch PDF - fetcher handles version numbers internally
+        pdf_path = fetcher.fetch(request.arxiv_id)
 
-    # ===============================================
-    # Add these NEW ENDPOINTS at the bottom of routes.py
-    # ===============================================
+        # Analyze it
+        analysis = orchestrator.analysis_agent.analyze(clean_id, pdf_path)
 
-    # -----------------------------
-    # Fetch ArXiv Paper Endpoint
-    # -----------------------------
-    @router.post("/fetch_arxiv")
-    async def fetch_arxiv_paper(request: FetchArxivRequest):
-        """Fetch a paper from ArXiv and add to session"""
-        try:
-            # Clean arxiv_id - remove version suffix for storage key
-            clean_id = request.arxiv_id.split('v')[0] if 'v' in request.arxiv_id else request.arxiv_id
-            
-            logger.info(f"Fetching ArXiv paper {request.arxiv_id} (clean: {clean_id}) for session {request.session_id}")
-            
-            # Fetch PDF - fetcher handles version numbers internally
-            pdf_path = fetcher.fetch(request.arxiv_id)
-            
-            # Analyze it
-            analysis = orchestrator.analysis_agent.analyze(clean_id, pdf_path)
-            
-            # Add to session using clean_id as the key
-            session_manager.add_paper_to_session(request.session_id, clean_id, analysis)
-            
-            return {
-                "status": "success",
-                "paper_id": clean_id,
-                "session_id": request.session_id,
-                "num_claims": analysis.get("num_claims", 0)
-            }
-        except Exception as e:
-            logger.error(f"Error fetching ArXiv paper {request.arxiv_id}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        # Add to session using clean_id as the key
+        session_manager.add_paper_to_session(request.session_id, clean_id, analysis)
+
+        return {
+            "status": "success",
+            "paper_id": clean_id,
+            "session_id": request.session_id,
+            "num_claims": analysis.get("num_claims", 0)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching ArXiv paper {request.arxiv_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-    # -----------------------------
-    # Search ArXiv Directly
-    # -----------------------------
-    @router.get("/search_arxiv")
-    async def search_arxiv_papers(query: str, max_results: int = 8):
-        """Direct ArXiv search endpoint"""
-        try:
-            logger.info(f"Searching ArXiv for: {query}")
-            
-            # Create client (required in newer arxiv library versions)
-            client = arxiv.Client()
-            
-            # Create search
+# -----------------------------
+# Search ArXiv Direct (alternative)
+# -----------------------------
+@router.get("/search_arxiv_direct")
+async def search_arxiv_papers(query: str, max_results: int = 8):
+    """Direct ArXiv search endpoint"""
+    try:
+        logger.info(f"Searching ArXiv for: {query}")
+
+        # Create client (required in newer arxiv library versions)
+        client = arxiv.Client()
+
+        # Create search
+        search = arxiv.Search(
+            query=query,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.Relevance
+        )
+
+        results = []
+        # Use client.results() instead of search.results()
+        for result in client.results(search):
+            arxiv_id = result.entry_id.split('/')[-1].split('v')[0]
+            results.append({
+                "id": arxiv_id,
+                "title": result.title,
+                "authors": [a.name for a in result.authors[:3]],
+                "abstract": result.summary[:250] + "..." if len(result.summary) > 250 else result.summary,
+                "published": str(result.published.date())
+            })
+
+        logger.info(f"Found {len(results)} papers for query: {query}")
+        return {"results": results, "query": query}
+
+    except Exception as e:
+        logger.error(f"ArXiv search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -----------------------------
+# Trending Papers Fallback (internal helper)
+# -----------------------------
+async def get_trending_papers():
+    """Get currently trending/popular papers from ArXiv"""
+    try:
+        categories = ["cs.LG", "cs.AI", "cs.CL", "cs.CV"]
+        suggestions = []
+
+        client = arxiv.Client()
+
+        for category in categories:
             search = arxiv.Search(
-                query=query,
-                max_results=max_results,
-                sort_by=arxiv.SortCriterion.Relevance
+                query=f"cat:{category}",
+                max_results=2,
+                sort_by=arxiv.SortCriterion.SubmittedDate
             )
-            
-            results = []
-            # Use client.results() instead of search.results()
+
             for result in client.results(search):
                 arxiv_id = result.entry_id.split('/')[-1].split('v')[0]
-                results.append({
+                suggestions.append({
                     "id": arxiv_id,
                     "title": result.title,
                     "authors": [a.name for a in result.authors[:3]],
-                    "abstract": result.summary[:250] + "..." if len(result.summary) > 250 else result.summary,
-                    "published": str(result.published.date())
+                    "abstract": result.summary[:200] + "..." if len(result.summary) > 200 else result.summary,
+                    "published": str(result.published.date()),
+                    "category": category
                 })
-            
-            logger.info(f"Found {len(results)} papers for query: {query}")
-            return {"results": results, "query": query}
-            
-        except Exception as e:
-            logger.error(f"ArXiv search error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+
+        return {
+            "suggestions": suggestions,
+            "type": "trending",
+            "note": "These are recent popular papers. Upload a paper to get personalized suggestions."
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching trending papers: {e}")
+        return {
+            "suggestions": [],
+            "error": "Could not fetch trending papers"
+        }
 
 
-    # -----------------------------
-    # Smart Paper Suggestions (AI-powered)
-    # -----------------------------
-    @router.post("/suggest_papers")
-    async def suggest_related_papers(request: SuggestPapersRequest):
-        """
-        Intelligently suggest related papers based on existing analyses.
-        Uses Gemini to understand the research topics and search ArXiv.
-        """
-        try:
-            logger.info(f"Generating smart suggestions for session {request.session_id}")
-            
-            # Load session
-            session = session_manager.get_session(request.session_id)
-            analyses = session.get("analysis_results", {})
-            
-            if not analyses:
-                # No papers yet - return trending papers from ArXiv
-                return await get_trending_papers()
-            
-            # Extract key information from existing papers
-            all_claims = []
-            all_methods = set()
-            all_metrics = set()
-            
-            for paper_id, analysis in analyses.items():
-                for claim in analysis.get("claims", []):
-                    all_claims.append(claim.get("text", ""))
-                    all_methods.update(claim.get("methods", []))
-                    all_metrics.update(claim.get("metrics", []))
-            
-            # Use Gemini to understand the research domain and generate search queries
-            from app.llm.llm_client import LLMClient
-            llm = LLMClient()
-            
-            # Create a prompt for understanding the research domain
-            context = {
-                "sample_claims": all_claims[:5],
-                "methods": list(all_methods)[:10],
-                "metrics": list(all_metrics)[:10]
-            }
-            
-            prompt = f"""Based on this research context, generate 3-5 specific ArXiv search queries 
-    to find highly related papers. Return ONLY a JSON array of search strings.
-
-    Context:
-    - Sample claims: {context['sample_claims']}
-    - Methods used: {context['methods']}
-    - Metrics: {context['metrics']}
-
-    Return format: ["query1", "query2", "query3"]
-    Focus on: specific techniques, models, datasets, or problem domains mentioned.
+# -----------------------------
+# Smart Paper Suggestions (AI-powered)
+# -----------------------------
+@router.post("/suggest_related_papers")
+async def suggest_related_papers(request: dict):
     """
-            
-            try:
-                response = llm.call(prompt, max_tokens=200, temperature=0.3)
-                # Parse search queries from LLM response
-                import json
-                import re
-                
-                # Clean response
-                cleaned = response.strip()
-                if "```" in cleaned:
-                    match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', cleaned, re.DOTALL)
-                    if match:
-                        cleaned = match.group(1)
-                
-                search_queries = json.loads(cleaned)
-                logger.info(f"Generated queries: {search_queries}")
-                
-            except Exception as e:
-                logger.warning(f"LLM query generation failed: {e}. Using fallback.")
-                # Fallback: use methods and claims directly
-                search_queries = [
-                    " ".join(list(all_methods)[:3]),
-                    " ".join(all_claims[0].split()[:10]) if all_claims else "machine learning"
-                ]
-            
-            # Search ArXiv with generated queries
-            suggestions = []
-            seen_ids = set(analyses.keys())  # Don't suggest papers we already have
-            
-            client = arxiv.Client()
-            
-            for query in search_queries[:3]:  # Limit to 3 queries
-                try:
-                    search = arxiv.Search(
-                        query=query,
-                        max_results=3,
-                        sort_by=arxiv.SortCriterion.Relevance
-                    )
-                    
-                    for result in client.results(search):
-                        arxiv_id = result.entry_id.split('/')[-1].split('v')[0]
-                        
-                        if arxiv_id not in seen_ids:
-                            suggestions.append({
-                                "id": arxiv_id,
-                                "title": result.title,
-                                "authors": [a.name for a in result.authors[:3]],
-                                "abstract": result.summary[:200] + "..." if len(result.summary) > 200 else result.summary,
-                                "published": str(result.published.date()),
-                                "relevance_query": query
-                            })
-                            seen_ids.add(arxiv_id)
-                            
-                            if len(suggestions) >= 6:  # Limit total suggestions
-                                break
-                    
-                    if len(suggestions) >= 6:
-                        break
-                        
-                except Exception as e:
-                    logger.warning(f"ArXiv search failed for query '{query}': {e}")
-                    continue
-            
-            return {
-                "suggestions": suggestions,
-                "based_on_methods": list(all_methods)[:5],
-                "search_queries_used": search_queries[:3]
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generating suggestions: {e}")
-            # Fallback to trending papers
+    Intelligently suggest related papers based on existing analyses.
+    Uses Gemini to understand the research topics and search ArXiv.
+    Accepts a simple dict payload with optional 'session_id' to avoid needing an extra Pydantic model import.
+    """
+    try:
+        # Extract session id from the incoming request dict or object
+        session_id = None
+        if isinstance(request, dict):
+            session_id = request.get("session_id")
+        else:
+            session_id = getattr(request, "session_id", None)
+
+        logger.info(f"Generating smart suggestions for session {session_id}")
+
+        # Load session
+        session = session_manager.load_session(session_id) if session_id else {}
+        analyses = session.get("analysis_results", {}) if session else {}
+
+        if not analyses:
+            # No papers yet - return trending papers from ArXiv
             return await get_trending_papers()
 
+        # Extract key information from existing papers
+        all_claims = []
+        all_methods = set()
+        all_metrics = set()
 
-    # -----------------------------
-    # Trending Papers Fallback
-    # -----------------------------
-    async def get_trending_papers():
-        """Get currently trending/popular papers from ArXiv"""
+        for paper_id, analysis in analyses.items():
+            for claim in analysis.get("claims", []):
+                all_claims.append(claim.get("text", ""))
+                all_methods.update(claim.get("methods", []))
+                all_metrics.update(claim.get("metrics", []))
+
+        # Use Gemini to understand the research domain and generate search queries
+        from app.llm.llm_client import LLMClient
+        llm = LLMClient()
+
+        # Create a prompt for understanding the research domain
+        context = {
+            "sample_claims": all_claims[:5],
+            "methods": list(all_methods)[:10],
+            "metrics": list(all_metrics)[:10]
+        }
+
+        prompt = f"""Based on this research context, generate 3-5 specific ArXiv search queries 
+to find highly related papers. Return ONLY a JSON array of search strings.
+
+Context:
+- Sample claims: {context['sample_claims']}
+- Methods used: {context['methods']}
+- Metrics: {context['metrics']}
+
+Return format: ["query1", "query2", "query3"]
+Focus on: specific techniques, models, datasets, or problem domains mentioned.
+"""
+
         try:
-            categories = ["cs.LG", "cs.AI", "cs.CL", "cs.CV"]
-            suggestions = []
-            
-            client = arxiv.Client()
-            
-            for category in categories:
+            response = llm.call(prompt, max_tokens=200, temperature=0.3)
+            # Parse search queries from LLM response
+            import json
+            import re
+
+            # Clean response
+            cleaned = response.strip()
+            if "```" in cleaned:
+                match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', cleaned, re.DOTALL)
+                if match:
+                    cleaned = match.group(1)
+
+            search_queries = json.loads(cleaned)
+            logger.info(f"Generated queries: {search_queries}")
+
+        except Exception as e:
+            logger.warning(f"LLM query generation failed: {e}. Using fallback.")
+            # Fallback: use methods and claims directly
+            search_queries = [
+                " ".join(list(all_methods)[:3]),
+                " ".join(all_claims[0].split()[:10]) if all_claims else "machine learning"
+            ]
+
+        # Search ArXiv with generated queries
+        suggestions = []
+        seen_ids = set(analyses.keys())  # Don't suggest papers we already have
+
+        client = arxiv.Client()
+
+        for query in search_queries[:3]:  # Limit to 3 queries
+            try:
                 search = arxiv.Search(
-                    query=f"cat:{category}",
-                    max_results=2,
-                    sort_by=arxiv.SortCriterion.SubmittedDate
+                    query=query,
+                    max_results=3,
+                    sort_by=arxiv.SortCriterion.Relevance
                 )
-                
+
                 for result in client.results(search):
                     arxiv_id = result.entry_id.split('/')[-1].split('v')[0]
-                    suggestions.append({
-                        "id": arxiv_id,
-                        "title": result.title,
-                        "authors": [a.name for a in result.authors[:3]],
-                        "abstract": result.summary[:200] + "..." if len(result.summary) > 200 else result.summary,
-                        "published": str(result.published.date()),
-                        "category": category
-                    })
-            
-            return {
-                "suggestions": suggestions,
-                "type": "trending",
-                "note": "These are recent popular papers. Upload a paper to get personalized suggestions."
-            }
-            
-        except Exception as e:
-            logger.error(f"Error fetching trending papers: {e}")
-            return {
-                "suggestions": [],
-                "error": "Could not fetch trending papers"
-            }
+
+                    if arxiv_id not in seen_ids:
+                        suggestions.append({
+                            "id": arxiv_id,
+                            "title": result.title,
+                            "authors": [a.name for a in result.authors[:3]],
+                            "abstract": result.summary[:200] + "..." if len(result.summary) > 200 else result.summary,
+                            "published": str(result.published.date()),
+                            "relevance_query": query
+                        })
+                        seen_ids.add(arxiv_id)
+
+                        if len(suggestions) >= 6:  # Limit total suggestions
+                            break
+
+                if len(suggestions) >= 6:
+                    break
+
+            except Exception as e:
+                logger.warning(f"ArXiv search failed for query '{query}': {e}")
+                continue
+
+        return {
+            "suggestions": suggestions,
+            "based_on_methods": list(all_methods)[:5],
+            "search_queries_used": search_queries[:3]
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating suggestions: {e}")
+        # Fallback to trending papers
+        return await get_trending_papers()

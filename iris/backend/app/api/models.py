@@ -15,3 +15,10 @@ class SynthesizeRequest(BaseModel):
 
 class EvaluationResponse(BaseModel):
     report: Dict[str, Any]
+
+class FetchArxivRequest(BaseModel):
+        session_id: str
+        arxiv_id: str
+
+class SuggestPapersRequest(BaseModel):
+        session_id: str
