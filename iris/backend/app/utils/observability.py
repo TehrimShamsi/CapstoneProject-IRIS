@@ -114,4 +114,91 @@ def print_metrics():
 def get_metrics() -> Dict[str, Any]:
     """Return a shallow copy of current metrics for API endpoints."""
     # Return the metrics structure (shallow copy to avoid external mutation)
-    return {k: v for k, v in METRICS.items()}
+    out = {k: v for k, v in METRICS.items()}
+
+    # --- Derived analytics from sessions ---
+    try:
+        from pathlib import Path
+        import json
+
+        base = Path(__file__).resolve().parents[2] / "data"
+        legacy_base = Path.cwd() / "backend" / "app" / "data"
+
+        session_paths = []
+        for p in [base, legacy_base]:
+            sp = p / "sessions"
+            if sp.exists():
+                session_paths.extend(list(sp.glob("*.json")))
+
+        # Aggregations
+        claims_over_time = {}  # date -> count
+        confidence_values = []
+        method_freq = {}
+
+        for sfile in session_paths:
+            try:
+                s = json.loads(sfile.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            papers = s.get("papers", {}) or {}
+            for pid, pentry in papers.items():
+                added = pentry.get("added_at") or s.get("updated_at") or s.get("created_at")
+                date_key = None
+                if added:
+                    date_key = added.split("T")[0]
+                analysis = pentry.get("analysis") or {}
+                claims = analysis.get("claims") if isinstance(analysis, dict) else []
+                # Count claims
+                if date_key:
+                    claims_over_time[date_key] = claims_over_time.get(date_key, 0) + (len(claims) if claims else 0)
+
+                if claims:
+                    for c in claims:
+                        # confidence
+                        try:
+                            conf = float(c.get("confidence", 0.0))
+                            confidence_values.append(max(0, min(1, conf)))
+                        except Exception:
+                            pass
+                        # methods
+                        for m in c.get("methods", []) or []:
+                            method_freq[m] = method_freq.get(m, 0) + 1
+
+        # Convert claims_over_time to sorted list
+        cot_list = []
+        for k in sorted(claims_over_time.keys()):
+            cot_list.append({"time": k, "label": k, "count": claims_over_time[k]})
+
+        out["claims_over_time"] = cot_list
+        out["confidence_distribution"] = confidence_values
+        out["method_frequency"] = method_freq
+
+    except Exception:
+        # Best-effort: if aggregation fails, return base metrics only
+        out.setdefault("claims_over_time", [])
+        out.setdefault("confidence_distribution", [])
+        out.setdefault("method_frequency", {})
+
+    # --- Agent performance summary ---
+    perf = {}
+    try:
+        calls = METRICS.get("agent_calls", {})
+        errors = METRICS.get("agent_errors", {})
+        lat = METRICS.get("agent_latency", {})
+        for agent_name, calls_list in calls.items():
+            total_calls = sum(calls_list) if isinstance(calls_list, list) else calls_list
+            total_errors = sum(errors.get(agent_name, [])) if isinstance(errors.get(agent_name, []), list) else errors.get(agent_name, 0)
+            lat_list = lat.get(agent_name, []) or []
+            avg_latency = (sum(lat_list) / len(lat_list)) if lat_list else None
+            perf[agent_name] = {
+                "calls": int(total_calls) if total_calls is not None else 0,
+                "errors": int(total_errors) if total_errors is not None else 0,
+                "avg_latency": float(avg_latency) if avg_latency is not None else None,
+            }
+    except Exception:
+        perf = {}
+
+    out["agent_performance"] = perf
+
+    return out

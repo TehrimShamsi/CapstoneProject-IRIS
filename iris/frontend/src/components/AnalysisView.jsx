@@ -31,7 +31,7 @@ export default function AnalysisView() {
         if (res.status === "accepted" || res.status === "success") {
           // Step 2: Poll session until analysis is ready
           let pollCount = 0;
-          const maxPolls = 30; // 30 * 1.5s = 45s timeout
+          const maxPolls = 120; // 120 * 1.5s = 180s timeout
           
           const interval = setInterval(async () => {
             pollCount++;
@@ -39,9 +39,13 @@ export default function AnalysisView() {
             try {
               const sessionData = await getSession(sessionId);
 
-              // ✅ FIXED: Check analysis_results instead of papers
-              if (sessionData.analysis_results?.[paperId]) {
-                // Found completed analysis
+              // Check new shape under `papers[paperId].analysis` first,
+              // then fall back to legacy `analysis_results[paperId]`.
+              if (sessionData.papers?.[paperId]?.analysis) {
+                clearInterval(interval);
+                setAnalysis(sessionData.papers[paperId].analysis);
+                setLoading(false);
+              } else if (sessionData.analysis_results?.[paperId]) {
                 clearInterval(interval);
                 setAnalysis(sessionData.analysis_results[paperId]);
                 setLoading(false);

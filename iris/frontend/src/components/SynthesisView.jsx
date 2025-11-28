@@ -231,25 +231,28 @@ export default function SynthesisView() {
           <>
             <div className="space-y-3 mb-6">
               {analyzedPapers.map((pid) => {
-                const claims = session.papers[pid]?.analysis?.claims || [];
-                return (
-                  <label
-                    key={pid}
-                    className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      className="w-5 h-5 text-blue-600"
-                      checked={selectedPapers.includes(pid)}
-                      onChange={() => togglePaper(pid)}
-                    />
-                    <div className="flex-1">
-                      <span className="font-medium text-gray-800">{pid}</span>
-                      <span className="text-sm text-gray-500 ml-2">({claims.length} claims)</span>
-                    </div>
-                  </label>
-                );
-              })}
+                  const paperData = session.papers[pid] || {};
+                  const claims = paperData?.analysis?.claims || [];
+                  const title = paperData?.title || pid;
+                  return (
+                    <label
+                      key={pid}
+                      className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="w-5 h-5 text-blue-600"
+                        checked={selectedPapers.includes(pid)}
+                        onChange={() => togglePaper(pid)}
+                      />
+                      <div className="flex-1">
+                        <span className="font-medium text-gray-800">{title}</span>
+                        <span className="text-sm text-gray-500 ml-2">({claims.length} claims)</span>
+                        <div className="text-xs text-gray-400 mt-1">ID: <span className="font-mono">{pid}</span></div>
+                      </div>
+                    </label>
+                  );
+                })}
             </div>
 
             {/* Synthesize button */}
@@ -272,6 +275,29 @@ export default function SynthesisView() {
                   className="bg-blue-600 h-2 rounded transition-all"
                   style={{ width: `${progress}%` }}
                 ></div>
+              </div>
+            )}
+
+            {/* Add more papers options (when only 1 paper) */}
+            {analyzedPapers.length === 1 && !loading && !synthesis && (
+              <div className="mt-6 pt-6 border-t border-gray-200">
+                <p className="text-gray-600 mb-4 text-center text-sm">
+                  Need more papers for synthesis? Add another paper:
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => navigate("/")}
+                    className="flex-1 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 font-medium transition"
+                  >
+                    📄 Upload Paper
+                  </button>
+                  <button
+                    onClick={() => navigate("/search")}
+                    className="flex-1 px-4 py-2 bg-cyan-50 text-cyan-600 rounded-lg hover:bg-cyan-100 font-medium transition"
+                  >
+                    🔍 Search Papers
+                  </button>
+                </div>
               </div>
             )}
           </>

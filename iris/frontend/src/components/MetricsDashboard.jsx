@@ -252,13 +252,7 @@ export default function MetricsDashboard() {
         {renderAgentPerf(agentPerf)}
       </div>
 
-      {/* Fallback raw JSON */}
-      <div className="mt-8 bg-white p-4 rounded-xl shadow">
-        <h3 className="font-semibold mb-3">Raw metrics (debug)</h3>
-        <pre className="text-sm text-gray-700 max-h-60 overflow-auto bg-gray-50 p-3 rounded">
-          {JSON.stringify(metrics, null, 2)}
-        </pre>
-      </div>
+      {/* Raw metrics removed to keep dashboard clean */}
     </div>
   );
 }

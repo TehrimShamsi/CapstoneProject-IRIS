@@ -18,17 +18,30 @@ class Orchestrator:
         """
         Analyze a single paper and store result in session.
         Returns the analysis result immediately.
+        
+        Handles both arXiv papers and locally-uploaded papers (identified by UUID).
         """
         from app.tools.arxiv_fetcher import ArxivFetcher
+        from app.tools.pdf_processor import PDFProcessor
+        from pathlib import Path
+        import os
         
         logger.info(f"[ORCH] Starting analysis for paper: {paper_id}")
         
-        fetcher = ArxivFetcher()
-        
         try:
-            # Ensure we have the PDF
-            pdf_path = fetcher.fetch(paper_id)
-            logger.info(f"[ORCH] PDF fetched: {pdf_path}")
+            # Check if PDF already exists locally (for uploaded papers)
+            pdf_processor = PDFProcessor()
+            pdf_path = str(pdf_processor.base / f"{paper_id}.pdf")
+            
+            if os.path.exists(pdf_path):
+                logger.info(f"[ORCH] Found local PDF: {pdf_path}")
+            else:
+                # Try to fetch from arXiv (for arXiv IDs)
+                logger.info(f"[ORCH] PDF not found locally, fetching from arXiv: {paper_id}")
+                fetcher = ArxivFetcher()
+                pdf_path = fetcher.fetch(paper_id)
+            
+            logger.info(f"[ORCH] PDF ready: {pdf_path}")
             
             # Run analysis
             analysis_result = self.analysis_agent.analyze(paper_id, pdf_path)

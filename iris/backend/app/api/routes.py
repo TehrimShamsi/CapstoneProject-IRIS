@@ -35,9 +35,30 @@ async def upload_pdf(file: UploadFile = File(...)):
     try:
         logger.info(f"/upload called — saving file {file.filename} size={getattr(file.file, 'length', 'unknown')}")
         pdf_path = pdf_processor.save_pdf(file, paper_id)
-        session_manager.create_paper_entry(paper_id, {"pdf_path": pdf_path})
 
-        logger.info(f"Saved PDF for paper_id={paper_id} at {pdf_path}")
+        # Try to extract a human-friendly title from the uploaded PDF.
+        title = None
+        try:
+            # Use the PDFProcessor text extractor — take the first non-empty line
+            text = pdf_processor.extract_text(pdf_path)
+            if text:
+                # Use the first non-empty line as a candidate title
+                for line in text.splitlines():
+                    clean = line.strip()
+                    if len(clean) > 6:
+                        title = clean[:200]
+                        break
+        except Exception as e:
+            logger.debug(f"Could not extract text/title from uploaded PDF: {e}")
+
+        # Persist paper metadata (include filename, pdf_path and optional title)
+        metadata = {"pdf_path": pdf_path, "filename": file.filename, "source": "upload"}
+        if title:
+            metadata["title"] = title
+
+        session_manager.create_paper_entry(paper_id, metadata)
+
+        logger.info(f"Saved PDF for paper_id={paper_id} at {pdf_path} (title={title})")
 
         return UploadPDFResponse(
             paper_id=paper_id,

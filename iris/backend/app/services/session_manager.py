@@ -64,6 +64,8 @@ class SessionManager:
             "metadata": metadata or {},
             "papers": {},           # ← FIX: Changed from [] to {}
             "analyses": [],
+            # Backwards compatibility: legacy key used elsewhere in code
+            "analysis_results": {},
             "notes": [],
             "file_sizes": {},
             "synthesis_result": None
@@ -88,7 +90,90 @@ class SessionManager:
             session["papers"][paper_id] = {}
 
         session["papers"][paper_id]["analysis"] = analysis
+
+        # Try to populate a human-friendly title for UI
+        title = None
+        # Prefer title inside the analysis if the agent extracted it
+        if isinstance(analysis, dict):
+            title = analysis.get("title")
+
+        # Next, try to read a stored paper metadata file if present
+        try:
+            papers_dir = self.base_dir / "papers"
+            paper_meta_file = papers_dir / f"{paper_id}.json"
+            if paper_meta_file.exists():
+                meta = json.loads(paper_meta_file.read_text(encoding="utf-8"))
+                meta_info = meta.get("metadata") if isinstance(meta, dict) else None
+                if meta_info:
+                    title = title or meta_info.get("title") or meta_info.get("filename") or meta_info.get("arxiv_id")
+                    # persist pdf_path and source if present so UI can use them
+                    if meta_info.get("pdf_path"):
+                        session["papers"][paper_id]["pdf_path"] = meta_info.get("pdf_path")
+                    if meta_info.get("source"):
+                        session["papers"][paper_id]["source"] = meta_info.get("source")
+                title = title or meta.get("title")
+        except Exception:
+            title = title or None
+
+        # Fallback: derive from pdf filename if available
+        if not title:
+            pdf_path = None
+            try:
+                pdf_path = session["papers"][paper_id].get("pdf_path") or (analysis.get("pdf_path") if isinstance(analysis, dict) else None)
+            except Exception:
+                pdf_path = None
+            if pdf_path:
+                try:
+                    from pathlib import Path as _P
+                    title = _P(pdf_path).stem
+                except Exception:
+                    title = None
+
+        # Try to read PDF embedded metadata (Title) if available
+        if not title:
+            try:
+                pdf_path = session["papers"][paper_id].get("pdf_path") or (analysis.get("pdf_path") if isinstance(analysis, dict) else None)
+                if pdf_path and os.path.exists(pdf_path):
+                    try:
+                        import PyPDF2
+                        reader = PyPDF2.PdfReader(pdf_path)
+                        meta = None
+                        # PyPDF2 exposes metadata in different attributes depending on version
+                        if hasattr(reader, "metadata"):
+                            meta = reader.metadata
+                        elif hasattr(reader, "documentInfo"):
+                            meta = reader.documentInfo
+
+                        if meta:
+                            # metadata may be Mapping-like or object with attributes
+                            title_candidate = None
+                            try:
+                                title_candidate = getattr(meta, "title", None)
+                            except Exception:
+                                title_candidate = None
+
+                            if not title_candidate:
+                                try:
+                                    title_candidate = meta.get("/Title") if isinstance(meta, dict) else None
+                                except Exception:
+                                    title_candidate = None
+
+                            if title_candidate:
+                                title = str(title_candidate).strip()
+                    except Exception:
+                        # ignore PDF metadata read errors
+                        pass
+            except Exception:
+                pass
+
+        session["papers"][paper_id]["title"] = title
+
         session["papers"][paper_id]["added_at"] = iso_now()
+
+        # Mirror into legacy `analysis_results` for backward compatibility
+        if "analysis_results" not in session:
+            session["analysis_results"] = {}
+        session["analysis_results"][paper_id] = analysis
 
         session["analyses"].append({
             "paper_id": paper_id,

@@ -1,7 +1,9 @@
 // frontend/src/components/UploadPaper.jsx
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { uploadPDF, createSession } from "../services/api";
+
+const SESSION_STORAGE_KEY = "iris_session_id";
 
 export default function UploadPaper() {
   const navigate = useNavigate();
@@ -12,6 +14,14 @@ export default function UploadPaper() {
   const [paperId, setPaperId] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [error, setError] = useState(null);
+
+  // Initialize session on component mount
+  useEffect(() => {
+    const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (storedSessionId) {
+      setSessionId(storedSessionId);
+    }
+  }, []);
 
   const handleDrop = (e) => {
     e.preventDefault();
@@ -49,11 +59,17 @@ export default function UploadPaper() {
       const uploadRes = await uploadPDF(file);
       setPaperId(uploadRes.paper_id);
 
-      const sessionRes = await createSession();
-      setSessionId(sessionRes.session_id);
+      // Get or create session
+      let sid = sessionId;
+      if (!sid) {
+        const sessionRes = await createSession();
+        sid = sessionRes.session_id;
+        setSessionId(sid);
+        localStorage.setItem(SESSION_STORAGE_KEY, sid);
+      }
 
       setTimeout(() => {
-        navigate(`/analyze/${uploadRes.paper_id}?session=${sessionRes.session_id}`);
+        navigate(`/analyze/${uploadRes.paper_id}?session=${sid}`);
       }, 1500);
     } catch (err) {
       console.error("Upload error:", err);
@@ -97,6 +113,15 @@ export default function UploadPaper() {
         >
           📊 View Metrics
         </button>
+
+        {sessionId && (
+          <button
+            onClick={() => navigate(`/synthesize?session=${sessionId}`)}
+            className="flex-1 py-3 px-6 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition shadow-md font-semibold"
+          >
+            ✨ Go to Synthesis
+          </button>
+        )}
       </div>
 
       <div className="mb-6 text-center">
@@ -220,6 +245,22 @@ export default function UploadPaper() {
       >
         {uploading ? "Uploading..." : "Upload & Analyze"}
       </button>
+
+      {/* New Session Button */}
+      {sessionId && (
+        <button
+          onClick={() => {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+            setSessionId(null);
+            setFile(null);
+            setPaperId(null);
+            setError(null);
+          }}
+          className="w-full mt-3 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
+        >
+          Start New Session
+        </button>
+      )}
     </div>
   );
 }

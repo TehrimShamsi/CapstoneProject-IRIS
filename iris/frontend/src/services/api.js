@@ -63,7 +63,11 @@ export async function getEvaluation(sessionId) {
 
 // Backwards-compatible alias used by components
 export async function getEvaluationReport(sessionId = null) {
-  const sid = sessionId || "demo";
+  // Prefer explicit sessionId, then the persisted session in localStorage.
+  const sid = sessionId || localStorage.getItem("iris_session_id");
+  if (!sid) {
+    throw new Error("No active session found. Upload or select papers before viewing the evaluation report.");
+  }
   return getEvaluation(sid);
 }
 
