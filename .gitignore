@@ -59,3 +59,82 @@ client_secret_*.json
 # Ignore the nested iris/ workspace folder contents if you manage them separately
 # (optional: comment out if you want to track files under `iris/` directly)
 # iris/
+/.venv
+.env
+
+# Distribution / packaging
+*.egg
+*.egg-info
+dist/
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Frontend
+/frontend/node_modules
+/frontend/dist
+
+# Vite / build caches
+/.parcel-cache/
+.vite/
+
+# Local env files
+.env
+.env.*
+**/.env
+/backend/.env
+/frontend/.env
+
+# Secrets and keys
+client_secret_*.json
+*-sa.json
+*.key
+*.pem
+*.crt
+
+# IDEs and editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# local caches
+.cache/
+
+# ====================================
+# DATA FILES - DO NOT COMMIT TO GIT
+# ====================================
+# PDFs downloaded from ArXiv or uploaded
+/backend/data/
+/backend/papers/
+*.pdf
+
+# Session and memory bank data
+/backend/app/data/
+/backend/app/sessions/
+/backend/app/memory_bank/
+
+# Any JSON data files
+/backend/data/**/*.json
+/backend/papers/**/*.json
+
+# Exclude all data directories
+**/data/pdfs/
+**/data/sessions/
+**/data/memory_bank/
+**/data/papers/
