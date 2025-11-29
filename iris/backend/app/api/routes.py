@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from app.tools.pdf_processor import PDFProcessor
 from app.tools.arxiv_fetcher import ArxivFetcher
 from app.services.session_manager import SessionManager
-from app.agents.orchestrator import Orchestrator
+# Delayed import of Orchestrator to avoid heavy dependencies at module import time
 from app.agents.search_agent import SearchAgent
 from app.utils.evaluation import AgentEvaluator
 from app.utils.observability import get_metrics
@@ -19,7 +19,16 @@ from app.api.models import (
 router = APIRouter()
 
 session_manager = SessionManager()
-orchestrator = Orchestrator(session_manager)
+orchestrator = None
+
+def get_orchestrator(enable_a2a: bool = True):
+    """Lazily instantiate the Orchestrator to avoid heavy imports at module load time."""
+    global orchestrator
+    if orchestrator is None:
+        # Import here to avoid importing heavy agent modules during FastAPI startup
+        from app.agents.orchestrator import Orchestrator
+        orchestrator = Orchestrator(session_manager, enable_a2a=enable_a2a)
+    return orchestrator
 pdf_processor = PDFProcessor()
 fetcher = ArxivFetcher()
 evaluator = AgentEvaluator()
@@ -85,7 +94,8 @@ async def create_session_endpoint(user_id: str = "demo_user"):
 @router.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
-        result = orchestrator.analyze_paper(
+        orch = get_orchestrator()
+        result = orch.analyze_paper(
             session_id=req.session_id,
             paper_id=req.paper_id
         )
@@ -100,7 +110,8 @@ async def analyze(req: AnalyzeRequest):
 @router.post("/synthesize")
 async def synthesize(req: SynthesizeRequest):
     try:
-        result = orchestrator.synthesize(
+        orch = get_orchestrator()
+        result = orch.synthesize(
             session_id=req.session_id,
             paper_ids=req.paper_ids
         )
@@ -455,7 +466,8 @@ async def fetch_arxiv_paper(request: FetchArxivRequest):
         pdf_path = fetcher.fetch(request.arxiv_id)
 
         # Analyze it
-        analysis = orchestrator.analysis_agent.analyze(clean_id, pdf_path)
+        orch = get_orchestrator()
+        analysis = orch.analysis_agent.analyze(clean_id, pdf_path)
 
         # Add to session using clean_id as the key
         session_manager.add_paper_to_session(request.session_id, clean_id, analysis)
@@ -687,3 +699,101 @@ Focus on: specific techniques, models, datasets, or problem domains mentioned.
         logger.error(f"Error generating suggestions: {e}")
         # Fallback to trending papers
         return await get_trending_papers()
+    
+
+# ===== NEW: VECTOR SEARCH ENDPOINT =====
+@router.get("/search_papers_semantic")
+async def search_papers_semantic(
+    query: str = Query(..., description="Semantic search query"),
+    top_k: int = Query(5, ge=1, le=20, description="Number of results")
+):
+    """
+    Semantic search across analyzed papers using vector embeddings
+    
+    Args:
+        query: Natural language search query
+        top_k: Number of similar papers to return
+        
+    Returns:
+        List of papers/chunks ranked by semantic similarity
+    """
+    try:
+        from app.storage.vector_db import get_vector_db
+        
+        vector_db = get_vector_db()
+        results = vector_db.search(query, top_k=top_k)
+        
+        return {
+            "query": query,
+            "num_results": len(results),
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Semantic search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== NEW: SIMILAR PAPERS ENDPOINT =====
+@router.get("/similar_papers_vector/{paper_id}")
+async def find_similar_papers_vector(
+    paper_id: str,
+    top_k: int = Query(5, ge=1, le=10)
+):
+    """
+    Find papers similar to a given paper using vector embeddings
+    
+    Args:
+        paper_id: Reference paper ID
+        top_k: Number of similar papers
+        
+    Returns:
+        List of similar papers with similarity scores
+    """
+    try:
+        from app.storage.vector_db import get_vector_db
+        
+        vector_db = get_vector_db()
+        similar = vector_db.find_similar_papers(paper_id, top_k=top_k)
+        
+        return {
+            "reference_paper": paper_id,
+            "num_similar": len(similar),
+            "similar_papers": similar
+        }
+    except Exception as e:
+        logger.error(f"Similar papers error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== NEW: A2A MESSAGE HISTORY ENDPOINT =====
+@router.get("/a2a_messages/{trace_id}")
+async def get_a2a_messages(trace_id: str):
+    """
+    Get all A2A protocol messages for a trace ID
+    
+    Args:
+        trace_id: Trace ID to query
+        
+    Returns:
+        List of messages in the trace
+    """
+    try:
+        # Access orchestrator's router
+        orch = get_orchestrator()
+        if orch.router:
+            messages = orch.router.get_messages_by_trace(trace_id)
+            return {
+                "trace_id": trace_id,
+                "num_messages": len(messages),
+                "messages": [msg.dict() for msg in messages]
+            }
+        else:
+            return {
+                "trace_id": trace_id,
+                "num_messages": 0,
+                "messages": [],
+                "note": "A2A protocol not enabled"
+            }
+    except Exception as e:
+        logger.error(f"A2A message retrieval error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
