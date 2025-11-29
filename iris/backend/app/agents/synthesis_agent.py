@@ -146,10 +146,10 @@ Return JSON only.
     def _heuristic_synthesis(self, claims: List[Dict[str, str]]):
         """
         Lightweight heuristic synthesizer used when Gemini is unavailable.
-        - Consensus: find claim texts that share >=3 normalized tokens across different papers.
-        - Contradictions: detect simple polarity contradictions (contains 'increase' vs 'decrease', 'improve' vs 'worse'),
-          or explicit negation differences between similar claims.
-        This is intentionally simple but useful for local dev when the model is not available.
+                - Consensus: find claim texts that share >=2 normalized tokens across papers (configurable).
+                - Contradictions: detect polarity contradictions (e.g. 'increase' vs 'decrease', 'improve' vs 'worse'),
+                    and negation-based contradictions where one claim negates an otherwise similar claim.
+                This is intentionally simple but useful for local dev when the model is not available.
         """
         import re
         from collections import defaultdict
@@ -166,16 +166,18 @@ Return JSON only.
             toks = set(normalize(c.get("text", "")))
             token_sets.append((c.get("paper_id"), c.get("claim_id"), c.get("text", ""), toks))
 
-        # Consensus: if two claims from different papers share >=3 tokens
+        # Consensus: if two claims share >=N tokens (configurable), default 2
         consensus_map = {}
+        token_threshold = int(os.getenv("ANALYSIS_CONSENSUS_TOKEN_THRESHOLD", "2"))
+        strict_cross = os.getenv("ANALYSIS_STRICT_CROSSPAPER", "0") == "1"
         for i in range(len(token_sets)):
             pid_i, cid_i, text_i, toks_i = token_sets[i]
             for j in range(i + 1, len(token_sets)):
                 pid_j, cid_j, text_j, toks_j = token_sets[j]
-                if pid_i == pid_j:
+                if strict_cross and pid_i == pid_j:
                     continue
                 common = toks_i & toks_j
-                if len(common) >= 3:
+                if len(common) >= token_threshold:
                     key = ' || '.join(sorted([pid_i, pid_j])) + ' :: ' + ' / '.join(sorted(list(common))[:5])
                     if key not in consensus_map:
                         consensus_map[key] = {
@@ -186,23 +188,44 @@ Return JSON only.
 
         consensus = list(consensus_map.values())
 
-        # Contradictions: simple polarity check
-        polarity_pairs = [ ("increase","decrease"), ("improve","worse"), ("higher","lower"), ("positive","negative") ]
+        # Contradictions: check polarity pairs and negation-based contradictions.
+        polarity_pairs = [ ("increase","decrease"), ("improve","worse"), ("higher","lower"), ("positive","negative"), ("gain","loss"), ("better","worse") ]
+        negation_terms = {"not","no","none","without","lack","fails","failed","doesn't","doesnt","cannot","can't","cant"}
         contradictions = []
         for i in range(len(token_sets)):
             pid_i, cid_i, text_i, toks_i = token_sets[i]
             for j in range(i + 1, len(token_sets)):
                 pid_j, cid_j, text_j, toks_j = token_sets[j]
-                if pid_i == pid_j:
+                if strict_cross and pid_i == pid_j:
                     continue
+                # require at least some overlap to consider contradiction (helps avoid spurious matches)
+                common = toks_i & toks_j
+                if len(common) < 1:
+                    continue
+                a_text = ' '.join(toks_i)
+                b_text = ' '.join(toks_j)
+                found = False
                 for a,b in polarity_pairs:
-                    if (a in ' '.join(toks_i) and b in ' '.join(toks_j)) or (b in ' '.join(toks_i) and a in ' '.join(toks_j)):
+                    if (a in a_text and b in b_text) or (b in a_text and a in b_text):
                         contradictions.append({
                             "claim_a": text_i,
                             "paper_a": pid_i,
                             "claim_b": text_j,
                             "paper_b": pid_j
                         })
+                        found = True
                         break
+                if found:
+                    continue
+                # Negation-based: one claim contains negation while the other does not and they share tokens
+                a_neg = any(nt in a_text for nt in negation_terms)
+                b_neg = any(nt in b_text for nt in negation_terms)
+                if a_neg != b_neg and len(common) >= 2:
+                    contradictions.append({
+                        "claim_a": text_i,
+                        "paper_a": pid_i,
+                        "claim_b": text_j,
+                        "paper_b": pid_j
+                    })
 
         return consensus, contradictions

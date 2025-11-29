@@ -146,15 +146,15 @@ export default function MetricsDashboard() {
 
     const maxVal = Math.max(...entries.map((e) => e[1])) || 1;
     return (
-      <div className="bg-white p-4 rounded-xl shadow overflow-auto">
+      <div className="bg-white p-4 rounded-xl shadow overflow-hidden">
         <h3 className="font-semibold mb-3">{title}</h3>
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {entries.map(([method, count]) => (
-            <div key={method} className="flex items-center gap-4">
-              <div className="w-40 text-sm text-gray-700">{method}</div>
-              <div className="flex-1 h-6 bg-gray-100 rounded">
+            <div key={method} className="flex items-center gap-4 w-full">
+              <div className="min-w-0 text-sm text-gray-700">{method}</div>
+              <div className="flex-1 h-6 bg-gray-100 rounded overflow-hidden">
                 <div
-                  className="h-6 rounded bg-indigo-500"
+                  className="h-6 bg-indigo-500"
                   style={{ width: `${(count / maxVal) * 100}%` }}
                 />
               </div>
@@ -225,7 +225,7 @@ export default function MetricsDashboard() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-10">
+    <div className="w-full px-6 py-10">
       {/* Home Icon Button */}
       <button
         onClick={() => navigate("/")}
@@ -253,10 +253,13 @@ export default function MetricsDashboard() {
           {renderLineChart(claimsOverTime, "Claims over time")}
         </div>
 
-        <div className="space-y-6">
+        <div>
           {renderHistogram(confidenceValues, "Confidence distribution")}
-          {renderMethodBarChart(methodFreq, "Top methods")}
         </div>
+      </div>
+
+      <div className="mt-6">
+        {renderMethodBarChart(methodFreq, "Top methods")}
       </div>
 
       <div className="mt-6">
