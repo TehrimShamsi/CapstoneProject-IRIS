@@ -137,3 +137,25 @@ export async function deleteSession(sessionId) {
   const res = await api.delete(`/session/${sessionId}`);
   return res.data;
 }
+
+// ===== NEW: Semantic Search =====
+export async function searchPapersSemantic(query, topK = 5) {
+  const res = await api.get("/search_papers_semantic", {
+    params: { query, top_k: topK }
+  });
+  return res.data;
+}
+
+// ===== NEW: Vector-based Similar Papers =====
+export async function findSimilarPapersVector(paperId, topK = 5) {
+  const res = await api.get(`/similar_papers_vector/${paperId}`, {
+    params: { top_k: topK }
+  });
+  return res.data;
+}
+
+// ===== NEW: A2A Message History =====
+export async function getA2AMessages(traceId) {
+  const res = await api.get(`/a2a_messages/${traceId}`);
+  return res.data;
+}

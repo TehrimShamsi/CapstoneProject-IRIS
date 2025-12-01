@@ -5,17 +5,22 @@ import re
 from typing import List, Dict, Any, Optional
 
 import google.generativeai as genai
+import time
+import traceback
 
-from app.utils.observability import agent_call
+from app.utils.observability import agent_call, logger
 from app.tools.pdf_processor import PDFProcessor
+from app.storage.vector_db import get_vector_db
+from app.protocol.a2a_messages import A2AAgent, MessageRouter, create_trace_id
 
-# Configure Gemini from env var - USE GOOGLE_API_KEY (not GEMINI_API_KEY)
+# Configure Gemini from env var — REQUIRED (no fallback to Application Default Credentials)
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
-if GOOGLE_KEY:
-    genai.configure(api_key=GOOGLE_KEY)
-else:
-    # If not set, we'll still allow the module to import; runtime calls will error clearly.
-    pass
+if not GOOGLE_KEY:
+    raise RuntimeError(
+        "GOOGLE_API_KEY environment variable is required for AnalysisAgent. "
+        "Set it in .env or your environment before starting the server."
+    )
+genai.configure(api_key=GOOGLE_KEY)
 
 
 def _clean_model_text(text: str) -> str:
@@ -25,61 +30,208 @@ def _clean_model_text(text: str) -> str:
     """
     if not text:
         return text
-    # Remove triple-backtick blocks and keep the inner content if needed
+    # Prefer explicit JSON markers if present
+    m = re.search(r"<json>([\s\S]*?)</json>", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"<JSON>([\s\S]*?)</JSON>", text, flags=re.IGNORECASE)
+    if m2:
+        return m2.group(1).strip()
+
+    # Support BEGIN/END JSON markers used in some prompts
+    m3 = re.search(r"BEGIN[_\s-]*JSON[:\s]*([\s\S]*?)END[_\s-]*JSON", text, flags=re.IGNORECASE)
+    if m3:
+        return m3.group(1).strip()
+
     if "```" in text:
         parts = text.split("```")
-        # find a part that looks like JSON
         for part in parts:
             p = part.strip()
             if p.startswith("{") or p.startswith("["):
                 text = p
                 break
         else:
-            # fallback to the middle part
             text = parts[1] if len(parts) > 1 else parts[0]
-    # Remove a leading "json" marker
     text = re.sub(r'^\s*json\s*', '', text, flags=re.IGNORECASE)
     return text.strip()
 
 
-class AnalysisAgent:
+def _repair_json(text: str) -> str:
     """
-    Gemini-powered AnalysisAgent.
+    Attempt best-effort repairs on malformed JSON:
+    - Remove trailing commas before closing braces/brackets
+    - Fix common quote issues
+    """
+    # Remove trailing commas before } or ]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    # Fix smart quotes (curly quotes) to regular quotes
+    text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
+    return text
+
+
+def _attempt_extract_json(text: str) -> Optional[dict]:
+    """
+    Try several heuristics to extract JSON from an arbitrary model string.
+    Returns a parsed dict on success, or None on failure.
+    Prioritizes explicit <JSON> tags for deterministic extraction.
+    """
+    if not text:
+        return None
+    
+    # PRIORITY 1: Look for explicit <JSON>...</JSON> tags (model was asked to wrap output)
+    try:
+        for tag_pattern in [
+            r"<json>([\s\S]*?)</json>",
+            r"<JSON>([\s\S]*?)</JSON>",
+            r"BEGIN[_\s-]*JSON[:\s]*([\s\S]*?)END[_\s-]*JSON"
+        ]:
+            m = re.search(tag_pattern, text, flags=re.IGNORECASE)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1).strip())
+                    logger.debug(f"Successfully parsed JSON from explicit tags")
+                    return parsed
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Found explicit tags but JSON is malformed: {e}")
+                    continue
+    except re.error:
+        pass
+    
+    # PRIORITY 2: Try direct load of the whole text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # PRIORITY 3: Try to repair common JSON issues and retry
+    try:
+        repaired = _repair_json(text)
+        return json.loads(repaired)
+    except Exception:
+        pass
+
+    # Try to find a JSON substring by looking for first { ... } or [ ... ]
+    # This is a best-effort approach: grab from first opening brace to last closing brace.
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        try:
+            start = text.find(open_ch)
+            end = text.rfind(close_ch)
+            if start != -1 and end != -1 and end > start:
+                candidate = text[start:end + 1]
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    # try cleaning candidate from markdown code fences
+                    cand_clean = _clean_model_text(candidate)
+                    try:
+                        return json.loads(cand_clean)
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+
+    # Try to find a JSON-like substring using regex (non-greedy for braces)
+    try:
+        m = re.search(r"(\{(?:.|\n)*?\})", text)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
+class AnalysisAgent(A2AAgent):
+    """
+    Gemini-powered AnalysisAgent with A2A protocol support and vector embeddings.
     Extracts structured claims, methods and metrics from PDF text.
     """
 
-    def __init__(self, model_name: str = None):
+    def __init__(self, model_name: str = None, router: Optional[MessageRouter] = None):
+        # Initialize A2A support if router provided
+        if router:
+            super().__init__("AnalysisAgent", router)
+        else:
+            self.agent_name = "AnalysisAgent"
+            self.router = None
+        
         self.pdf = PDFProcessor()
-        # Use GOOGLE_MODEL from env, fallback to gemini-2.5-flash
         self.model_name = model_name or os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
-        # Create a model handle if configured
+        
+        # Initialize vector DB
+        self.vector_db = get_vector_db()
+        
+        # Create model handle if configured
         try:
             self.model = genai.GenerativeModel(self.model_name)
         except Exception:
             self.model = None
+        # cooldown timestamp to avoid repeated 429 retries
+        self._cooldown_until = 0.0
+        # Try to provision a lighter fallback model (used before the conservative local fallback)
+        self.fallback_model = None
+        try:
+            lite_name = os.getenv("GOOGLE_LITE_FALLBACK_MODEL", "gemini-2.5-flash-lite")
+            # only create if different from primary
+            if lite_name != self.model_name:
+                try:
+                    self.fallback_model = genai.GenerativeModel(lite_name)
+                except Exception:
+                    self.fallback_model = None
+        except Exception:
+            self.fallback_model = None
 
     @agent_call("AnalysisAgent")
     def analyze(self, paper_id: str, pdf_path: str, trace_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Main entry: extract text from pdf_path, chunk it, run Gemini to extract
-        structured claims from the top-K chunks, and return analysis JSON.
+        structured claims from the top-K chunks, generate embeddings, and return analysis JSON.
         """
+        trace_id = trace_id or create_trace_id()
+        
+        # Send status update via A2A if available
+        if self.router:
+            self.send_status("processing", progress=0.0, trace_id=trace_id)
+        
+        # Extract full text
         full_text = self.pdf.extract_text(pdf_path)
         chunks = self._chunk_text(full_text, chunk_size_chars=1500, overlap_chars=200)
+        
+        # Add chunks to vector DB for semantic search
+        try:
+            logger.info(f"Adding {len(chunks)} chunks to vector DB for paper {paper_id}")
+            self.vector_db.add_paper_chunks(
+                paper_id=paper_id,
+                chunks=chunks,
+                paper_metadata={"pdf_path": pdf_path}
+            )
+            # Save index after adding new paper
+            self.vector_db.save()
+        except Exception as e:
+            logger.warning(f"Failed to add paper to vector DB: {e}")
 
         claims: List[Dict[str, Any]] = []
-        max_chunks = 6  # keep within free-tier / token limits
+        max_chunks = int(os.getenv("ANALYSIS_MAX_CHUNKS", "6"))
+        
         for i, chunk in enumerate(chunks[:max_chunks]):
+            # Update progress
+            if self.router:
+                progress = (i + 1) / max_chunks
+                self.send_status("processing", progress=progress, trace_id=trace_id)
+            
             claim_data = self._extract_with_gemini(chunk, chunk_id=i)
             if claim_data:
                 claim_obj = {
                     "claim_id": f"{paper_id}_claim_{i}",
                     "text": claim_data.get("text"),
-                        "confidence": float(claim_data.get("confidence", 0.0)),
+                    "confidence": float(claim_data.get("confidence", 0.0)),
                     "provenance": claim_data.get("provenance", [f"chunk_{i}"]),
                     "methods": claim_data.get("methods", []),
                     "metrics": claim_data.get("metrics", []),
-                        "used_fallback": bool(claim_data.get("used_fallback", False)),
+                    "used_fallback": bool(claim_data.get("used_fallback", False)),
                 }
                 claims.append(claim_obj)
 
@@ -89,9 +241,20 @@ class AnalysisAgent:
             "num_chunks_analyzed": min(len(chunks), max_chunks),
             "num_claims": len(claims),
             "claims": claims,
-            # Indicate whether any claim came from the heuristic fallback
-            "used_fallback": any([c.get("used_fallback") for c in claims])
+            "used_fallback": any([c.get("used_fallback") for c in claims]),
+            "vector_indexed": True  # Flag indicating vector embeddings created
         }
+        
+        # Send completion status via A2A
+        if self.router:
+            self.send_status("idle", progress=1.0, trace_id=trace_id)
+            self.send_result(
+                to_agent="Orchestrator",
+                task_id=f"analyze_{paper_id}",
+                result=analysis,
+                trace_id=trace_id
+            )
+        
         return analysis
 
     def _chunk_text(self, text: str, chunk_size_chars: int = 1500, overlap_chars: int = 200) -> List[str]:
@@ -106,7 +269,6 @@ class AnalysisAgent:
         N = len(text)
         while start < N:
             end = min(start + chunk_size_chars, N)
-            # try to extend to sentence boundary
             if end < N:
                 next_period = text.rfind(".", start, end)
                 if next_period and next_period > start:
@@ -122,54 +284,244 @@ class AnalysisAgent:
         Use Gemini to extract a single key claim and structured fields.
         Returns dict with keys: text, confidence, methods, metrics, provenance
         """
-        # Build the prompt — keep concise to save tokens
-        prompt = f"""
-Extract ONE key research claim from the following text. Return ONLY valid JSON (no explanation).
+        prompt = f"""Extract ONE key research claim from this text. Return ONLY a JSON block inside <JSON>...</JSON> tags.
 
-Text (truncated):
-{text[:1200]}
+Text:
+{text[:1000]}
 
-Desired JSON:
+<JSON>
 {{
-  "text": "string - the claim as one clear sentence",
-  "confidence": 0.0,
-  "methods": ["method1", "method2"],
-  "metrics": ["accuracy", "f1"]
+  "text": "claim as one sentence",
+  "confidence": 0.8,
+  "methods": [],
+  "metrics": []
 }}
+</JSON>"""
 
-Return JSON ONLY.
-"""
+        # Helper to call a model instance and parse result. Returns dict or raises.
+        def _call_model_and_parse(model_instance):
+            # Try multiple token budgets to avoid truncated responses (increased upper limit)
+            token_attempts = [512, 1024, 2048]
+            last_exc = None
+            for max_tokens in token_attempts:
+                response = None
+                try:
+                    response = model_instance.generate_content(
+                        prompt,
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.15,
+                            max_output_tokens=max_tokens
+                        )
+                    )
+                except Exception as e:
+                    last_exc = e
+                    logger.debug(f"Model call failed for max_tokens={max_tokens}: {e}")
+                    continue
 
-        # If model not configured, fallback to heuristic
-        if self.model is None:
-            return self._fallback_extraction(text, chunk_id)
+                # Debug: log the response structure so we can inspect what the SDK returned
+                try:
+                    logger.debug(f"Model response repr: {repr(response)}")
+                    logger.debug(f"Model response dir: {dir(response)}")
+                    try:
+                        if hasattr(response, 'result') and getattr(response.result, 'parts', None):
+                            parts = []
+                            for p in response.result.parts:
+                                try:
+                                    parts.append(p if not hasattr(p, 'text') else p.text)
+                                except Exception:
+                                    parts.append(str(p))
+                            logger.debug(f"Response.result.parts: {parts}")
+                    except Exception:
+                        pass
 
-        try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.15,
-                    max_output_tokens=280
-                )
-            )
-            raw = response.text or ""
-            cleaned = _clean_model_text(raw)
-            parsed = json.loads(cleaned)
-            # Ensure types
-            parsed.setdefault("provenance", [f"chunk_{chunk_id}"])
-            parsed.setdefault("methods", parsed.get("methods") or [])
-            parsed.setdefault("metrics", parsed.get("metrics") or [])
-            # Mark that this claim was produced by the model (not fallback)
-            parsed.setdefault("used_fallback", False)
-            # normalize confidence
+                    try:
+                        if getattr(response, 'candidates', None):
+                            cands = []
+                            for cand in response.candidates:
+                                try:
+                                    content = getattr(cand, 'content', {})
+                                    parts = getattr(content, 'parts', None) or (content.get('parts') if isinstance(content, dict) else None)
+                                    if parts:
+                                        cands.append([p.text if hasattr(p, 'text') else str(p) for p in parts])
+                                    else:
+                                        cands.append(repr(cand))
+                                except Exception:
+                                    cands.append(str(cand))
+                            logger.debug(f"Response.candidates: {cands}")
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug("Failed to introspect model response for debug logging")
+
+                # Extract raw text from possible SDK shapes
+                raw_local = ""
+                try:
+                    text_attr = getattr(response, 'text', None)
+                    if text_attr:
+                        raw_local = text_attr
+                    else:
+                        parts_list = []
+                        try:
+                            rv_parts = getattr(response, 'parts', None)
+                            if rv_parts:
+                                for p in rv_parts:
+                                    parts_list.append(getattr(p, 'text', str(p)))
+                        except Exception:
+                            pass
+
+                        try:
+                            if hasattr(response, 'result') and getattr(response.result, 'parts', None):
+                                for p in response.result.parts:
+                                    parts_list.append(getattr(p, 'text', str(p)))
+                        except Exception:
+                            pass
+
+                        try:
+                            cands = getattr(response, 'candidates', None)
+                            if cands:
+                                for cand in cands:
+                                    if isinstance(cand, str):
+                                        parts_list.append(cand)
+                                        continue
+                                    if isinstance(cand, (list, tuple)):
+                                        for item in cand:
+                                            parts_list.append(str(item))
+                                        continue
+                                    try:
+                                        content = getattr(cand, 'content', None) or (cand if isinstance(cand, dict) else None)
+                                        parts = None
+                                        if isinstance(content, dict):
+                                            parts = content.get('parts')
+                                        else:
+                                            parts = getattr(content, 'parts', None) if content is not None else None
+                                        if parts:
+                                            for p in parts:
+                                                parts_list.append(getattr(p, 'text', str(p)))
+                                            continue
+                                    except Exception:
+                                        pass
+                                    parts_list.append(str(cand))
+                        except Exception:
+                            pass
+
+                        raw_local = ''.join(parts_list)
+
+                    if not raw_local:
+                        try:
+                            raw_local = str(response)
+                        except Exception:
+                            raw_local = ""
+                except Exception:
+                    raw_local = ""
+
+                logger.debug(f"Raw LLM output for parsing (max_tokens={max_tokens}): {repr(raw_local[:500])}")
+
+                # If the model evidently hit max tokens (metadata present) or output empty, retry with larger token budget
+                try:
+                    cand_meta = ''
+                    if getattr(response, 'candidates', None):
+                        cand_meta = ' '.join([str(c) for c in response.candidates])
+                    
+                    # Check for finish_reason to detect truncation
+                    finish_reason = ""
+                    try:
+                        if getattr(response, 'candidates', None) and len(response.candidates) > 0:
+                            cand = response.candidates[0]
+                            finish_reason = getattr(cand, 'finish_reason', '')
+                    except Exception:
+                        pass
+                    
+                    if (not raw_local) or ('MAX_TOKENS' in cand_meta or 'finish_reason: MAX_TOKENS' in cand_meta or finish_reason == 'MAX_TOKENS'):
+                        logger.info(f"Model output empty or truncated (max_tokens={max_tokens}, finish_reason={finish_reason}); retrying with larger token budget")
+                        last_exc = RuntimeError("truncated or empty response")
+                        continue
+                except Exception:
+                    pass
+
+                # Parsing attempts
+                parsed_local = _attempt_extract_json(raw_local)
+                if parsed_local is None:
+                    repaired = _repair_json(raw_local)
+                    parsed_local = _attempt_extract_json(repaired)
+                if parsed_local is None:
+                    cleaned_local = _clean_model_text(raw_local)
+                    parsed_local = _attempt_extract_json(cleaned_local)
+
+                if parsed_local is not None:
+                    return parsed_local
+                else:
+                    last_exc = RuntimeError("Could not parse JSON from model response")
+
+            # If we exit the loop without returning, raise the last exception
+            if last_exc:
+                raise last_exc
+            raise ValueError("Could not parse JSON from model response")
+
+        now = time.time()
+
+        tried_models = []
+
+        # Try primary model first if available and not cooling down
+        if self.model is not None and now >= getattr(self, "_cooldown_until", 0.0):
             try:
-                parsed["confidence"] = float(parsed.get("confidence", 0.0))
-            except Exception:
-                parsed["confidence"] = 0.0
-            return parsed
-        except Exception as e:
-            # log via observability (agent_call will capture exception logs) and fallback
-            return self._fallback_extraction(text, chunk_id)
+                parsed = _call_model_and_parse(self.model)
+                parsed.setdefault("provenance", [f"chunk_{chunk_id}"])
+                parsed.setdefault("methods", parsed.get("methods") or [])
+                parsed.setdefault("metrics", parsed.get("metrics") or [])
+                parsed.setdefault("used_fallback", False)
+                try:
+                    parsed["confidence"] = float(parsed.get("confidence", 0.0))
+                except Exception:
+                    parsed["confidence"] = 0.0
+                return parsed
+            except Exception as e:
+                tried_models.append(("primary", e))
+                msg = str(e)
+                lower = msg.lower()
+                if "quota" in lower or "429" in lower or "rate limit" in lower:
+                    retry_secs = None
+                    m = re.search(r"please retry in\s*(\d+(?:\.\d+)?)s", msg, flags=re.IGNORECASE)
+                    if m:
+                        try:
+                            retry_secs = float(m.group(1))
+                        except Exception:
+                            retry_secs = None
+                    if retry_secs is None:
+                        retry_secs = float(os.getenv("ANALYSIS_QUOTA_COOLDOWN_SECS", "15"))
+                    self._cooldown_until = time.time() + retry_secs
+                    logger.warning(f"Primary LLM rate-limit detected; cooling down for {retry_secs}s: {msg}")
+                else:
+                    logger.warning(f"Primary LLM extraction failed: {e}")
+
+        # If primary failed or was unavailable, try lite fallback model if configured
+        if getattr(self, 'fallback_model', None) is not None:
+            try:
+                parsed = _call_model_and_parse(self.fallback_model)
+                parsed.setdefault("provenance", [f"chunk_{chunk_id}"])
+                parsed.setdefault("methods", parsed.get("methods") or [])
+                parsed.setdefault("metrics", parsed.get("metrics") or [])
+                parsed.setdefault("used_fallback", False)
+                try:
+                    parsed["confidence"] = float(parsed.get("confidence", 0.0))
+                except Exception:
+                    parsed["confidence"] = 0.0
+                return parsed
+            except Exception as e:
+                tried_models.append(("lite", e))
+                msg = str(e)
+                lower = msg.lower()
+                if "quota" in lower or "429" in lower or "rate limit" in lower:
+                    retry_secs = float(os.getenv("ANALYSIS_QUOTA_COOLDOWN_SECS", "15"))
+                    self._cooldown_until = time.time() + retry_secs
+                    logger.warning(f"Lite LLM rate-limit detected; cooling down for {retry_secs}s: {msg}")
+                else:
+                    logger.warning(f"Lite LLM extraction failed: {e}")
+
+        # All model attempts failed — log debug info and fall back to conservative extraction
+        for name, exc in tried_models:
+            logger.debug(f"Model attempt '{name}' failed: {exc}")
+        logger.info("Using local fallback extraction for chunk %s", chunk_id)
+        return self._fallback_extraction(text, chunk_id)
 
     def _fallback_extraction(self, text: str, chunk_id: int) -> Dict[str, Any]:
         """
@@ -177,10 +529,8 @@ Return JSON ONLY.
         """
         import re
 
-        # Break into candidate sentences (simple regex-based split)
         sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
 
-        # Choose a primary claim sentence (first reasonably long sentence)
         primary = None
         for s in sents:
             if len(s) > 30:
@@ -189,7 +539,6 @@ Return JSON ONLY.
         if not primary:
             primary = sents[0] if sents else text[:200].strip()
 
-        # Heuristic method detection (common model names / keywords)
         method_keywords = [
             r'BERT', r'RoBERTa', r'Transformer', r'Transformers', r'CNN', r'RNN', r'LSTM',
             r'GAN', r'SVM', r'reinforcement learning', r'deep learning', r'self-supervised',
@@ -204,16 +553,13 @@ Return JSON ONLY.
             except re.error:
                 continue
 
-        # Heuristic metric detection (percentages and metric keywords)
         metrics_found = set()
-        # percentages like 92.5% or 92 %
         for m in re.findall(r"\b\d{1,3}(?:\.\d+)?\s?%", text):
             metrics_found.add(m.strip())
         for metric_kw in [r'accuracy', r'f1', r'precision', r'recall', r'auc', r'mse', r'rmse']:
             if re.search(metric_kw, text, flags=re.IGNORECASE):
                 metrics_found.add(metric_kw)
 
-        # Adjust confidence slightly if methods or metrics were found
         confidence = 0.35
         if methods_found and metrics_found:
             confidence = 0.55
@@ -226,6 +572,33 @@ Return JSON ONLY.
             "provenance": [f"chunk_{chunk_id}"],
             "methods": list(methods_found),
             "metrics": list(metrics_found),
-            # Indicate this claim was produced by the heuristic fallback
             "used_fallback": True
         }
+
+    # ============================================
+    # A2A Protocol Handlers
+    # ============================================
+    
+    def handle_task(self, message):
+        """Handle incoming task messages"""
+        task_name = message.payload.get("task_name")
+        parameters = message.payload.get("parameters", {})
+        
+        if task_name == "analyze_paper":
+            paper_id = parameters.get("paper_id")
+            pdf_path = parameters.get("pdf_path")
+            
+            try:
+                result = self.analyze(paper_id, pdf_path, trace_id=message.trace_id)
+                self.send_result(
+                    to_agent=message.from_agent,
+                    task_id=message.msg_id,
+                    result=result,
+                    trace_id=message.trace_id
+                )
+            except Exception as e:
+                self.send_error(
+                    error_code="ANALYSIS_FAILED",
+                    error_message=str(e),
+                    trace_id=message.trace_id
+                )
