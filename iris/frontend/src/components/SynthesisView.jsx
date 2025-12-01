@@ -176,6 +176,15 @@ export default function SynthesisView() {
     };
   }, [session, selectedPapers]);
 
+  // Map paper IDs to friendly labels (Paper 1, Paper 2, ...)
+  const paperLabelMap = useMemo(() => {
+    const m = {};
+    selectedPapers.forEach((pid, idx) => {
+      m[pid] = `Paper ${idx + 1}`;
+    });
+    return m;
+  }, [selectedPapers]);
+
   // ─────────────────────────────────────────────
   // Delete handlers
   // ─────────────────────────────────────────────
@@ -379,7 +388,7 @@ export default function SynthesisView() {
             {(!synthesis.consensus || synthesis.consensus.length === 0) ? (
               <EmptyBox>No consensus found</EmptyBox>
             ) : synthesis.consensus.map((c, i) => (
-              <ConsensusBox key={i} item={c} />
+              <ConsensusBox key={i} item={c} paperLabelMap={paperLabelMap} />
             ))}
           </Section>
 
@@ -388,7 +397,7 @@ export default function SynthesisView() {
             {(!synthesis.contradictions || synthesis.contradictions.length === 0) ? (
               <EmptyBox>No contradictions found</EmptyBox>
             ) : synthesis.contradictions.map((c, i) => (
-              <ContradictionBox key={i} item={c} />
+              <ContradictionBox key={i} item={c} paperLabelMap={paperLabelMap} />
             ))}
           </Section>
 
@@ -396,10 +405,11 @@ export default function SynthesisView() {
           {allMethods.length > 0 && (
             <Section title="📊 Method Comparison">
               <MethodMatrix
-                allMethods={allMethods}
-                selectedPapers={selectedPapers}
-                comparisonMatrix={comparisonMatrix}
-              />
+                  allMethods={allMethods}
+                  selectedPapers={selectedPapers}
+                  comparisonMatrix={comparisonMatrix}
+                  paperLabelMap={paperLabelMap}
+                />
             </Section>
           )}
 
@@ -526,16 +536,19 @@ function EmptyBox({ children }) {
   );
 }
 
-function ConsensusBox({ item }) {
+function ConsensusBox({ item, paperLabelMap }) {
   return (
     <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-green-500 mb-4">
       <p className="font-semibold text-lg text-gray-800 mb-3">{item.text}</p>
       <div className="flex flex-wrap gap-2 mb-2">
-        {item.papers?.map((pid, i) => (
-          <span key={i} className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
-            {pid}
-          </span>
-        ))}
+        {item.papers?.map((pid, i) => {
+          const label = (paperLabelMap && paperLabelMap[pid]) || pid;
+          return (
+            <span key={i} className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">
+              {label}
+            </span>
+          );
+        })}
       </div>
       <p className="text-sm text-gray-600">
         Avg Confidence:{" "}
@@ -545,21 +558,21 @@ function ConsensusBox({ item }) {
   );
 }
 
-function ContradictionBox({ item }) {
+function ContradictionBox({ item, paperLabelMap }) {
   return (
     <div className="bg-white p-6 rounded-xl shadow-md border-l-4 border-red-500 mb-4">
       <p className="font-bold text-red-600 mb-4">Conflicting Findings:</p>
 
       <div className="space-y-3">
         <div className="bg-red-50 p-4 rounded-lg">
-          <p className="text-sm text-red-700 font-semibold mb-1">{item.paper_a}</p>
+          <p className="text-sm text-red-700 font-semibold mb-1">{(paperLabelMap && paperLabelMap[item.paper_a]) || item.paper_a}</p>
           <p className="text-gray-800">{item.claim_a}</p>
         </div>
 
         <p className="text-center text-gray-400">vs</p>
 
         <div className="bg-red-50 p-4 rounded-lg">
-          <p className="text-sm text-red-700 font-semibold mb-1">{item.paper_b}</p>
+          <p className="text-sm text-red-700 font-semibold mb-1">{(paperLabelMap && paperLabelMap[item.paper_b]) || item.paper_b}</p>
           <p className="text-gray-800">{item.claim_b}</p>
         </div>
       </div>
@@ -567,7 +580,7 @@ function ContradictionBox({ item }) {
   );
 }
 
-function MethodMatrix({ allMethods, selectedPapers, comparisonMatrix }) {
+function MethodMatrix({ allMethods, selectedPapers, comparisonMatrix, paperLabelMap }) {
   return (
     <div className="bg-white rounded-xl shadow-md overflow-hidden">
       <table className="w-full">
@@ -576,7 +589,7 @@ function MethodMatrix({ allMethods, selectedPapers, comparisonMatrix }) {
             <th className="p-4 text-left font-semibold">Method</th>
             {selectedPapers.map((pid) => (
               <th key={pid} className="p-4 text-center font-semibold">
-                {pid.split(":")[1] || pid.substring(0, 8)}
+                {(paperLabelMap && paperLabelMap[pid]) || pid.split(":")[1] || pid.substring(0, 8)}
               </th>
             ))}
           </tr>

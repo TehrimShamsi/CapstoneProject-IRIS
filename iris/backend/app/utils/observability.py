@@ -8,6 +8,7 @@ Includes:
 """
 
 import logging
+import os
 import time
 import uuid
 from functools import wraps
@@ -18,7 +19,9 @@ from typing import Any, Dict
 # Global Logger
 # ---------------------------------------------------------
 logger = logging.getLogger("IRIS")
-logger.setLevel(logging.INFO)
+# Allow overriding log level with IRIS_LOG_LEVEL env var for debugging
+level_name = os.getenv("IRIS_LOG_LEVEL", "INFO").upper()
+logger.setLevel(getattr(logging, level_name, logging.INFO))
 
 handler = logging.StreamHandler()
 formatter = logging.Formatter(

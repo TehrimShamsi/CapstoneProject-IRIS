@@ -16,7 +16,13 @@ if (Test-Path $envFile) {
                 $name = $parts[0].Trim()
                 $value = $parts[1].Trim().Trim('"')
                 Write-Output "Setting env: $name"
-                $env:$name = $value
+                # Use Set-Item so variable names from .env (in $name) are applied correctly
+                try {
+                    Set-Item -Path "Env:$name" -Value $value -ErrorAction Stop
+                } catch {
+                    # Fallback to using the braced env variable syntax
+                    ${env:$name} = $value
+                }
             }
         }
     }

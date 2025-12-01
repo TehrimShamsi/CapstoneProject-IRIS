@@ -13,12 +13,14 @@ from app.tools.pdf_processor import PDFProcessor
 from app.storage.vector_db import get_vector_db
 from app.protocol.a2a_messages import A2AAgent, MessageRouter, create_trace_id
 
-# Configure Gemini from env var
+# Configure Gemini from env var — REQUIRED (no fallback to Application Default Credentials)
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
-if GOOGLE_KEY:
-    genai.configure(api_key=GOOGLE_KEY)
-else:
-    pass
+if not GOOGLE_KEY:
+    raise RuntimeError(
+        "GOOGLE_API_KEY environment variable is required for AnalysisAgent. "
+        "Set it in .env or your environment before starting the server."
+    )
+genai.configure(api_key=GOOGLE_KEY)
 
 
 def _clean_model_text(text: str) -> str:
@@ -28,6 +30,19 @@ def _clean_model_text(text: str) -> str:
     """
     if not text:
         return text
+    # Prefer explicit JSON markers if present
+    m = re.search(r"<json>([\s\S]*?)</json>", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r"<JSON>([\s\S]*?)</JSON>", text, flags=re.IGNORECASE)
+    if m2:
+        return m2.group(1).strip()
+
+    # Support BEGIN/END JSON markers used in some prompts
+    m3 = re.search(r"BEGIN[_\s-]*JSON[:\s]*([\s\S]*?)END[_\s-]*JSON", text, flags=re.IGNORECASE)
+    if m3:
+        return m3.group(1).strip()
+
     if "```" in text:
         parts = text.split("```")
         for part in parts:
@@ -41,16 +56,57 @@ def _clean_model_text(text: str) -> str:
     return text.strip()
 
 
+def _repair_json(text: str) -> str:
+    """
+    Attempt best-effort repairs on malformed JSON:
+    - Remove trailing commas before closing braces/brackets
+    - Fix common quote issues
+    """
+    # Remove trailing commas before } or ]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    # Fix smart quotes (curly quotes) to regular quotes
+    text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
+    return text
+
+
 def _attempt_extract_json(text: str) -> Optional[dict]:
     """
     Try several heuristics to extract JSON from an arbitrary model string.
     Returns a parsed dict on success, or None on failure.
+    Prioritizes explicit <JSON> tags for deterministic extraction.
     """
     if not text:
         return None
-    # First, try direct load
+    
+    # PRIORITY 1: Look for explicit <JSON>...</JSON> tags (model was asked to wrap output)
+    try:
+        for tag_pattern in [
+            r"<json>([\s\S]*?)</json>",
+            r"<JSON>([\s\S]*?)</JSON>",
+            r"BEGIN[_\s-]*JSON[:\s]*([\s\S]*?)END[_\s-]*JSON"
+        ]:
+            m = re.search(tag_pattern, text, flags=re.IGNORECASE)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1).strip())
+                    logger.debug(f"Successfully parsed JSON from explicit tags")
+                    return parsed
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Found explicit tags but JSON is malformed: {e}")
+                    continue
+    except re.error:
+        pass
+    
+    # PRIORITY 2: Try direct load of the whole text
     try:
         return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # PRIORITY 3: Try to repair common JSON issues and retry
+    try:
+        repaired = _repair_json(text)
+        return json.loads(repaired)
     except Exception:
         pass
 
@@ -228,74 +284,178 @@ class AnalysisAgent(A2AAgent):
         Use Gemini to extract a single key claim and structured fields.
         Returns dict with keys: text, confidence, methods, metrics, provenance
         """
-        prompt = f"""
-Extract ONE key research claim from the following text. Return ONLY valid JSON (no explanation).
+        prompt = f"""Extract ONE key research claim from this text. Return ONLY a JSON block inside <JSON>...</JSON> tags.
 
-Text (truncated):
-{text[:1200]}
+Text:
+{text[:1000]}
 
-Desired JSON:
+<JSON>
 {{
-  "text": "string - the claim as one clear sentence",
-  "confidence": 0.0,
-  "methods": ["method1", "method2"],
-  "metrics": ["accuracy", "f1"]
+  "text": "claim as one sentence",
+  "confidence": 0.8,
+  "methods": [],
+  "metrics": []
 }}
-
-Return JSON ONLY.
-"""
+</JSON>"""
 
         # Helper to call a model instance and parse result. Returns dict or raises.
         def _call_model_and_parse(model_instance):
-            response = model_instance.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.15,
-                    max_output_tokens=280
-                )
-            )
-            raw_local = ""
-            try:
-                if getattr(response, 'text', None):
-                    raw_local = response.text or ""
-                else:
-                    parts_list = []
-                    if hasattr(response, 'result') and getattr(response.result, 'parts', None):
-                        for p in response.result.parts:
-                            if isinstance(p, dict):
-                                parts_list.append(p.get('text', ''))
-                            else:
-                                parts_list.append(str(p))
-                    elif getattr(response, 'candidates', None):
-                        try:
-                            cand = response.candidates[0]
-                            content = getattr(cand, 'content', {})
-                            parts = getattr(content, 'parts', None) or content.get('parts') if isinstance(content, dict) else None
-                            if parts:
-                                for p in parts:
-                                    if isinstance(p, dict):
-                                        parts_list.append(p.get('text', ''))
+            # Try multiple token budgets to avoid truncated responses (increased upper limit)
+            token_attempts = [512, 1024, 2048]
+            last_exc = None
+            for max_tokens in token_attempts:
+                response = None
+                try:
+                    response = model_instance.generate_content(
+                        prompt,
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.15,
+                            max_output_tokens=max_tokens
+                        )
+                    )
+                except Exception as e:
+                    last_exc = e
+                    logger.debug(f"Model call failed for max_tokens={max_tokens}: {e}")
+                    continue
+
+                # Debug: log the response structure so we can inspect what the SDK returned
+                try:
+                    logger.debug(f"Model response repr: {repr(response)}")
+                    logger.debug(f"Model response dir: {dir(response)}")
+                    try:
+                        if hasattr(response, 'result') and getattr(response.result, 'parts', None):
+                            parts = []
+                            for p in response.result.parts:
+                                try:
+                                    parts.append(p if not hasattr(p, 'text') else p.text)
+                                except Exception:
+                                    parts.append(str(p))
+                            logger.debug(f"Response.result.parts: {parts}")
+                    except Exception:
+                        pass
+
+                    try:
+                        if getattr(response, 'candidates', None):
+                            cands = []
+                            for cand in response.candidates:
+                                try:
+                                    content = getattr(cand, 'content', {})
+                                    parts = getattr(content, 'parts', None) or (content.get('parts') if isinstance(content, dict) else None)
+                                    if parts:
+                                        cands.append([p.text if hasattr(p, 'text') else str(p) for p in parts])
                                     else:
-                                        parts_list.append(str(p))
+                                        cands.append(repr(cand))
+                                except Exception:
+                                    cands.append(str(cand))
+                            logger.debug(f"Response.candidates: {cands}")
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug("Failed to introspect model response for debug logging")
+
+                # Extract raw text from possible SDK shapes
+                raw_local = ""
+                try:
+                    text_attr = getattr(response, 'text', None)
+                    if text_attr:
+                        raw_local = text_attr
+                    else:
+                        parts_list = []
+                        try:
+                            rv_parts = getattr(response, 'parts', None)
+                            if rv_parts:
+                                for p in rv_parts:
+                                    parts_list.append(getattr(p, 'text', str(p)))
                         except Exception:
                             pass
-                    raw_local = ''.join(parts_list)
-                if not raw_local:
-                    try:
-                        raw_local = str(response)
-                    except Exception:
-                        raw_local = ""
-            except Exception:
-                raw_local = ""
 
-            cleaned_local = _clean_model_text(raw_local)
-            parsed_local = _attempt_extract_json(cleaned_local)
-            if parsed_local is None:
-                parsed_local = _attempt_extract_json(str(raw_local))
-            if parsed_local is None:
-                logger.debug(f"Failed to parse JSON from model response. cleaned='''{cleaned_local}''' raw='''{raw_local}'''")
-                raise ValueError("Could not parse JSON from model response")
-            return parsed_local
+                        try:
+                            if hasattr(response, 'result') and getattr(response.result, 'parts', None):
+                                for p in response.result.parts:
+                                    parts_list.append(getattr(p, 'text', str(p)))
+                        except Exception:
+                            pass
+
+                        try:
+                            cands = getattr(response, 'candidates', None)
+                            if cands:
+                                for cand in cands:
+                                    if isinstance(cand, str):
+                                        parts_list.append(cand)
+                                        continue
+                                    if isinstance(cand, (list, tuple)):
+                                        for item in cand:
+                                            parts_list.append(str(item))
+                                        continue
+                                    try:
+                                        content = getattr(cand, 'content', None) or (cand if isinstance(cand, dict) else None)
+                                        parts = None
+                                        if isinstance(content, dict):
+                                            parts = content.get('parts')
+                                        else:
+                                            parts = getattr(content, 'parts', None) if content is not None else None
+                                        if parts:
+                                            for p in parts:
+                                                parts_list.append(getattr(p, 'text', str(p)))
+                                            continue
+                                    except Exception:
+                                        pass
+                                    parts_list.append(str(cand))
+                        except Exception:
+                            pass
+
+                        raw_local = ''.join(parts_list)
+
+                    if not raw_local:
+                        try:
+                            raw_local = str(response)
+                        except Exception:
+                            raw_local = ""
+                except Exception:
+                    raw_local = ""
+
+                logger.debug(f"Raw LLM output for parsing (max_tokens={max_tokens}): {repr(raw_local[:500])}")
+
+                # If the model evidently hit max tokens (metadata present) or output empty, retry with larger token budget
+                try:
+                    cand_meta = ''
+                    if getattr(response, 'candidates', None):
+                        cand_meta = ' '.join([str(c) for c in response.candidates])
+                    
+                    # Check for finish_reason to detect truncation
+                    finish_reason = ""
+                    try:
+                        if getattr(response, 'candidates', None) and len(response.candidates) > 0:
+                            cand = response.candidates[0]
+                            finish_reason = getattr(cand, 'finish_reason', '')
+                    except Exception:
+                        pass
+                    
+                    if (not raw_local) or ('MAX_TOKENS' in cand_meta or 'finish_reason: MAX_TOKENS' in cand_meta or finish_reason == 'MAX_TOKENS'):
+                        logger.info(f"Model output empty or truncated (max_tokens={max_tokens}, finish_reason={finish_reason}); retrying with larger token budget")
+                        last_exc = RuntimeError("truncated or empty response")
+                        continue
+                except Exception:
+                    pass
+
+                # Parsing attempts
+                parsed_local = _attempt_extract_json(raw_local)
+                if parsed_local is None:
+                    repaired = _repair_json(raw_local)
+                    parsed_local = _attempt_extract_json(repaired)
+                if parsed_local is None:
+                    cleaned_local = _clean_model_text(raw_local)
+                    parsed_local = _attempt_extract_json(cleaned_local)
+
+                if parsed_local is not None:
+                    return parsed_local
+                else:
+                    last_exc = RuntimeError("Could not parse JSON from model response")
+
+            # If we exit the loop without returning, raise the last exception
+            if last_exc:
+                raise last_exc
+            raise ValueError("Could not parse JSON from model response")
 
         now = time.time()
 
